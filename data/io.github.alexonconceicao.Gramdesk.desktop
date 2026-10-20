@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Gramdesk
+GenericName=Instagram Client
+GenericName[pt_BR]=Cliente do Instagram
+Comment=Lightweight, private, multi-account Instagram desktop client
+Comment[pt_BR]=Cliente leve, privado e multi-conta para o Instagram
+Exec=gramdesk %u
+Icon=io.github.alexonconceicao.Gramdesk
+Terminal=false
+Categories=Network;InstantMessaging;Qt;
+Keywords=instagram;stories;social;
+StartupWMClass=io.github.alexonconceicao.Gramdesk

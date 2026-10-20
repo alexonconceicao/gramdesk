@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.alexonconceicao.Gramdesk</id>
+  <name>Gramdesk</name>
+  <summary>Lightweight, private, multi-account Instagram client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>Unofficial desktop wrapper for Instagram Web with isolated profiles per account,
+    hibernation of inactive accounts, ghost mode for stories, media downloads and no telemetry.</p>
+  </description>
+  <url type="homepage">https://github.com/alexonconceicao/gramdesk</url>
+  <launchable type="desktop-id">io.github.alexonconceicao.Gramdesk.desktop</launchable>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.7.0" date="2026-10-20"/>
+    <release version="0.6.0" date="2026-10-20"/>
+    <release version="0.5.1" date="2026-10-19"/>
+    <release version="0.5.0" date="2026-10-19"/>
+    <release version="0.4.0" date="2026-10-19"/>
+    <release version="0.3.0" date="2026-10-19"/>
+    <release version="0.2.0" date="2026-10-19"/>
+    <release version="0.1.0" date="2026-10-19"/>
+  </releases>
+</component>

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+build/
+dist/
+.flatpak-builder/
+flatpak/build-dir/
+flatpak/repo/
+*.flatpak
+*.egg-info/
+.pytest_cache/
+packaging/windows/version.txt
+gramdesk/_build_info.json

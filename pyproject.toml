@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gramdesk"
+version = "0.7.0"
+description = "Cliente desktop leve, privado e multi-conta para o Instagram"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = ["PyQt6>=6.6", "PyQt6-WebEngine>=6.6"]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+gramdesk = "gramdesk.app:main"
+
+[tool.setuptools]
+packages = ["gramdesk"]
+
+[tool.setuptools.package-data]
+gramdesk = ["*.js", "*.svg"]

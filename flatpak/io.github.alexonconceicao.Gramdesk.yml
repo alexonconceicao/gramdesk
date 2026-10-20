@@ -1,0 +1,40 @@
+app-id: io.github.alexonconceicao.Gramdesk
+runtime: org.kde.Platform
+runtime-version: "6.11"
+sdk: org.kde.Sdk
+base: com.riverbankcomputing.PyQt.BaseApp
+base-version: "6.11"
+command: gramdesk
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  # Única pasta do usuário acessível: onde os downloads são salvos.
+  - --filesystem=xdg-download/Gramdesk:create
+  - --env=QTWEBENGINEPROCESS_PATH=/app/bin/QtWebEngineProcess
+  - --env=QTWEBENGINE_DICTIONARIES_PATH=/app/qtwebengine_dictionaries
+cleanup-commands:
+  - /app/cleanup-BaseApp.sh
+modules:
+  - name: gramdesk
+    buildsystem: simple
+    build-commands:
+      - install -d ${FLATPAK_DEST}/lib/gramdesk/gramdesk
+      - install -m644 gramdesk/*.py gramdesk/*.js gramdesk/*.svg ${FLATPAK_DEST}/lib/gramdesk/gramdesk/
+      - if [ -f gramdesk/_build_info.json ]; then install -m644 gramdesk/_build_info.json ${FLATPAK_DEST}/lib/gramdesk/gramdesk/; fi
+      - install -Dm755 flatpak/gramdesk.sh ${FLATPAK_DEST}/bin/gramdesk
+      - install -Dm644 data/${FLATPAK_ID}.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      - install -Dm644 data/${FLATPAK_ID}.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm644 data/${FLATPAK_ID}.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .venv
+          - flatpak/build-dir
+          - flatpak/repo
+          - .flatpak-builder
