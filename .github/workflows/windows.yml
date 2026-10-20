@@ -28,6 +28,7 @@ jobs:
       - name: Configuração de release
         env:
           GRAMDESK_DONATION_URL: ${{ secrets.GRAMDESK_DONATION_URL }}
+          GRAMDESK_DONATION_LIQUID: ${{ secrets.GRAMDESK_DONATION_LIQUID }}
           GRAMDESK_DONATION_TITLE: ${{ vars.GRAMDESK_DONATION_TITLE }}
           GRAMDESK_DONATION_TEXT: ${{ vars.GRAMDESK_DONATION_TEXT }}
           GRAMDESK_DONATION_INTERVAL_DAYS: ${{ vars.GRAMDESK_DONATION_INTERVAL_DAYS }}

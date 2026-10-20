@@ -13,7 +13,7 @@ from . import security
 
 APP_NAME = "gramdesk"
 APP_ID = "io.github.alexonconceicao.Gramdesk"
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 
 
 IS_WINDOWS = os.name == "nt"

@@ -911,9 +911,32 @@ class MainWindow(QMainWindow):
         self.cfg.donation["last_shown"] = time.time()
         config.save(self.cfg)
         sheet = ui.Sheet(self.outer, c["title"], c["text"], width=560)
+        if c.get("liquid"):
+            box = QFrame()
+            box.setObjectName("row")
+            bl = QVBoxLayout(box)
+            bl.setContentsMargins(14, 12, 14, 12)
+            bl.setSpacing(8)
+            head = QLabel(f"Liquid ({c['liquid_assets']})")
+            head.setObjectName("rowTitle")
+            bl.addWidget(head)
+            addr = QLabel("\u200b".join(c["liquid"][i:i + 12] for i in range(0, len(c["liquid"]), 12)))
+            addr.setObjectName("mono")
+            addr.setWordWrap(True)
+            bl.addWidget(addr)
+            copy = QPushButton("  Copiar endereço")
+            ui.themed_icon(copy, "copy", "text", 18)
+            copy.setCursor(Qt.CursorShape.PointingHandCursor)
+            copy.clicked.connect(lambda: (QApplication.clipboard().setText(c["liquid"]),
+                                          self.toast.show_message("Endereço Liquid copiado.")))
+            bl.addWidget(copy, 0, Qt.AlignmentFlag.AlignLeft)
+            sheet.body.addWidget(box)
         sheet.add_button("Não mostrar mais", "never", "ghostBtn", left=True)
-        sheet.add_button("Agora não", None, "ghostBtn")
-        sheet.add_button(c["button"], "go", "primaryWide", default=True)
+        if c.get("url"):
+            sheet.add_button("Agora não", None, "ghostBtn")
+            sheet.add_button(c["button"], "go", "primaryWide", default=True)
+        else:
+            sheet.add_button("Fechar", None, "primaryWide", default=True)
         res = sheet.exec()
         if res == "never":
             self.cfg.donation["never"] = True

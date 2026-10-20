@@ -58,7 +58,7 @@ Segurança:
 Baixe `gramdesk-<versão>.flatpak` na página de [Releases](https://github.com/alexonconceicao/gramdesk/releases) e instale:
 
 ```bash
-flatpak install --user gramdesk-0.7.0.flatpak
+flatpak install --user gramdesk-0.7.1.flatpak
 flatpak run io.github.alexonconceicao.Gramdesk
 ```
 

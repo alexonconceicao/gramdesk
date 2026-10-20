@@ -232,6 +232,7 @@ QSlider::handle:horizontal {{ background: white; border: 1px solid {BORDER}; wid
 #error {{ color: {DANGER}; }}
 #rowTitle {{ font-weight: 600; }}
 #row {{ background: {SURFACE2}; border-radius: 14px; }}
+#mono {{ font-family: monospace; font-size: 12.5px; color: {TEXT}; }}
 #kbd {{ background: {SURFACE3}; border: 1px solid {BORDER}; border-radius: 6px; padding: 3px 8px; font-family: monospace; }}
 QProgressBar {{ background: {SURFACE3}; border: none; border-radius: 4px; }}
 QProgressBar::chunk {{ background: {QSS_GRAD}; border-radius: 4px; }}
