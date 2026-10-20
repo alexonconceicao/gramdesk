@@ -21,6 +21,8 @@ from PyQt6.QtWebEngineCore import (
 )
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 
+from .session_cookies import track_session
+
 from . import config, security
 
 HOME = QUrl("https://www.instagram.com/")
@@ -56,6 +58,12 @@ class GuardedPage(QWebEnginePage):
         s = url.toString()
         if url.scheme() in ("about", "data", "blob"):
             return not is_main_frame or url.scheme() == "about"
+        # Link externo do Instagram (l.instagram.com/?u=...): abre fora e fica no perfil atual.
+        target = security.unwrap_link_shim(s)
+        if target:
+            if is_main_frame:
+                self.externalLink.emit(QUrl(target))
+            return False
         if security.is_nav_allowed(s):
             return True
         if not is_main_frame and security.is_captcha(s):
@@ -70,7 +78,10 @@ class GuardedPage(QWebEnginePage):
         catcher = QWebEnginePage(self.profile(), self)
 
         def route(url: QUrl):
-            if security.is_nav_allowed(url.toString()):
+            target = security.unwrap_link_shim(url.toString())
+            if target:
+                self.externalLink.emit(QUrl(target))
+            elif security.is_nav_allowed(url.toString()):
                 self.setUrl(url)
             elif url.scheme() in ("http", "https"):
                 self.externalLink.emit(url)
@@ -115,6 +126,9 @@ class AccountSession(QObject):
         self._interceptor: Interceptor | None = None
         # Só o fato "existe cookie de sessão do Instagram"; o valor nunca é lido nem guardado.
         self.logged_in = False
+        # Cookies "sessionid" presentes, por (domínio, caminho, valor): a rotação do Instagram
+        # adiciona o novo antes de remover o antigo, então a remoção não pode zerar o login.
+        self._sessions: set[tuple[str, str, bytes]] = set()
 
     # ---------- ciclo de vida ----------
     @property
@@ -176,8 +190,7 @@ class AccountSession(QObject):
         self.view.setUrl(HOME)
 
     def _session_cookie(self, cookie, added: bool):
-        if bytes(cookie.name()) == b"sessionid" and cookie.domain().lstrip(".").endswith("instagram.com"):
-            self.logged_in = added and bool(bytes(cookie.value()))
+        self.logged_in = track_session(self._sessions, bytes(cookie.name()), cookie.domain(), cookie.path(), bytes(cookie.value()), added)
 
     @staticmethod
     def _harden(s: QWebEngineSettings):
@@ -354,6 +367,7 @@ class AccountSession(QObject):
         """Apaga cookies e cache já em memória; os arquivos são removidos ao reiniciar."""
         if self.profile is not None:
             self.profile.cookieStore().deleteAllCookies()
+            self._sessions.clear()
             self.logged_in = False
             self.profile.clearHttpCache()
             self.profile.clearAllVisitedLinks()

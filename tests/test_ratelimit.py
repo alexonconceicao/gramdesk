@@ -169,3 +169,24 @@ def test_log_has_no_sensitive_data(tmp_path):
         assert bad not in line
     if os.name != "nt":
         assert oct(os.stat(tmp_path / "research.log").st_mode & 0o777) == "0o600"
+
+
+
+def test_rotacao_do_cookie_de_sessao_mantem_login():
+    """Instagram adiciona o sessionid novo antes de remover o antigo: continua logado."""
+    from gramdesk.session_cookies import track_session
+
+    s: set = set()
+    assert track_session(s, b"sessionid", ".instagram.com", "/", b"velho", True)
+    assert track_session(s, b"sessionid", ".instagram.com", "/", b"novo", True)
+    assert track_session(s, b"sessionid", ".instagram.com", "/", b"velho", False)
+    assert not track_session(s, b"sessionid", ".instagram.com", "/", b"novo", False)
+    assert not track_session(set(), b"csrftoken", ".instagram.com", "/", b"x", True)
+
+
+def test_link_externo_do_instagram_abre_fora():
+    from gramdesk.security import unwrap_link_shim
+
+    assert unwrap_link_shim("https://l.instagram.com/?u=https%3A%2F%2Fwa.me%2F5571999&e=AT0") == "https://wa.me/5571999"
+    assert unwrap_link_shim("https://www.instagram.com/perfil/") is None
+    assert unwrap_link_shim("https://l.instagram.com/?u=javascript%3Aalert(1)") is None

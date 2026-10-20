@@ -199,3 +199,19 @@ def verify_password(password: str, record: dict | None) -> bool:
         return False
     dk = hashlib.scrypt(password.encode("utf-8"), salt=salt, **_SCRYPT)
     return hmac.compare_digest(dk, expected)
+
+
+_SHIM_HOSTS = ("l.instagram.com", "lm.instagram.com")
+
+
+def unwrap_link_shim(url: str) -> str | None:
+    """Link externo do Instagram passa por l.instagram.com/?u=<destino>. Devolve o destino http(s)
+    para abrir fora do app sem sair da página atual; None se não for um link desse tipo."""
+    from urllib.parse import parse_qs
+
+    p = urlsplit(url)
+    if p.scheme != "https" or (p.hostname or "").lower() not in _SHIM_HOSTS:
+        return None
+    target = (parse_qs(p.query).get("u") or [""])[0]
+    t = urlsplit(target)
+    return target if t.scheme in ("http", "https") and t.hostname else None
