@@ -26,6 +26,7 @@ SECTIONS = (
     ("accounts", "Contas", "user"),
     ("privacy", "Privacidade e segurança", "shield"),
     ("downloads", "Downloads", "folder"),
+    ("research", "Pesquisa de perfil", "search"),
     ("shortcuts", "Atalhos", "keyboard"),
     ("about", "Sobre", "info"),
 )
@@ -403,6 +404,45 @@ class PreferencesPage(QWidget):
             "O site não consegue iniciar downloads sozinho. Itens já baixados não são duplicados.",
             QWidget(),
         ))
+
+    def _research(self):
+        win = self.win
+        lim = win.research_limits()
+        b = self.body
+        b.addWidget(_label(
+            "Limites para não martelar o Instagram e proteger a conta. Valores por conta; os padrões são conservadores. "
+            "Se o Instagram pedir para ir mais devagar, a coleta para na hora e a conta entra em resfriamento "
+            "(30 min, 1 h, 2 h... até 24 h), que zera após uma coleta bem-sucedida.",
+            "muted", True,
+        ))
+
+        def seg(key, options, current):
+            w = ui.Segmented([(str(v), lbl) for v, lbl in options], str(current))
+            w.changed.connect(lambda v, key=key: (win.set_option("research_limits", {key: float(v) if "." in v else int(v)}),
+                                                  self._refresh_soon()))
+            return w
+
+        b.addWidget(_section_title("Cota diária"))
+        b.addWidget(ui.setting_row("Pesquisas por dia", "Coletas que acessam o Instagram, por conta.",
+                                   seg("daily_researches", [(1, "1"), (2, "2"), (3, "3"), (5, "5")], lim.daily_researches)))
+        b.addWidget(ui.setting_row("Itens por dia", "Requisições à API por conta (perfil, página de posts, comentários, destaques).",
+                                   seg("daily_items", [(100, "100"), (200, "200"), (400, "400")], lim.daily_items)))
+        b.addWidget(_section_title("Ritmo"))
+        b.addWidget(ui.setting_row("Itens por hora", f"Teto na última hora. Por minuto: {lim.per_minute}.",
+                                   seg("per_hour", [(30, "30"), (60, "60"), (90, "90")], lim.per_hour)))
+        pace = ui.Segmented([("2.5", "Normal"), ("4.0", "Lento"), ("6.0", "Muito lento")], f"{lim.min_delay:.1f}")
+        pace.changed.connect(lambda v: (win.set_option("research_limits", {"min_delay": float(v), "max_delay": float(v) * 2.4}),
+                                        self._refresh_soon()))
+        b.addWidget(ui.setting_row("Intervalo entre requisições",
+                                   f"Agora: {lim.min_delay:g} a {lim.max_delay:g} s, com pausa de {lim.long_min:g} a {lim.long_max:g} s "
+                                   f"a cada {lim.long_every} itens.", pace))
+        b.addWidget(ui.setting_row("Cache", f"Pesquisas do mesmo perfil feitas nas últimas {lim.cache_hours} h são reaproveitadas; "
+                                   "só o que falta é buscado.", QWidget()))
+        cur = win.current
+        if cur is not None:
+            st = win.rate.status(cur.account.id, lim)
+            txt = st["message"] or (f"Liberada. Hoje: {st['researches_today']} pesquisas, {st['items_today']} itens.")
+            b.addWidget(ui.setting_row(f"Situação de {cur.account.name}", txt, QWidget()))
 
     def _shortcuts(self):
         panel = QFrame()

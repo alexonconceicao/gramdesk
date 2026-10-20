@@ -132,12 +132,30 @@ class ResearchPage(QWidget):
         self.field.setPlaceholderText("@perfil ou link do perfil")
         self.field.returnPressed.connect(self._start)
         row.addWidget(self.field, 1)
-        acc = self.win.current.account.name if self.win.current else "nenhuma conta aberta"
+        cur = self.win.current
+        acc = cur.account.name if cur else "nenhuma conta aberta"
         start = _button("Pesquisar", self._start, "primaryWide", "search", "white")
-        start.setEnabled(self.win.current is not None and (self.win.research_job is None or self.win.research_job.state in research.STATES_FINAL))
+        idle = self.win.research_job is None or self.win.research_job.state in research.STATES_FINAL
         row.addWidget(start)
         f.addLayout(row)
         f.addWidget(_label(f"Usando a conta: {acc}", "muted"))
+        blocked = ""
+        if cur is not None:
+            lim = self.win.research_limits()
+            st = self.win.rate.status(cur.account.id, lim)
+            f.addWidget(_label(
+                f"Hoje: {st['researches_today']} de {lim.daily_researches} pesquisas · "
+                f"{st['items_today']} de {lim.daily_items} itens · última hora {st['items_last_hour']} de {lim.per_hour}. "
+                f"Ritmo: {lim.min_delay:g} a {lim.max_delay:g} s entre requisições, uma por vez. "
+                f"Pesquisas do mesmo perfil nas últimas {lim.cache_hours} h reaproveitam o que já foi coletado.",
+                "muted", True,
+            ))
+            if not st["ok"]:
+                blocked = st["message"]
+                f.addWidget(_label(blocked + " (pesquisas já completas no cache continuam disponíveis)", "error", True))
+            elif not cur.logged_in:
+                f.addWidget(_label(self.win.LOGIN_NEEDED, "error", True))
+        start.setEnabled(cur is not None and idle)
 
         posts = ui.Segmented([("30", "30 posts"), ("60", "60"), ("120", "120"), ("200", "200")], str(self.opts["posts"]))
         posts.changed.connect(lambda v: self.opts.__setitem__("posts", int(v)))

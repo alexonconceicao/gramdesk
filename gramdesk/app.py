@@ -31,7 +31,7 @@ from PyQt6.QtWidgets import (
 from . import config, security, ui
 from .gallery import GalleryPage
 from .prefs import PreferencesPage
-from . import donation, research
+from . import donation, ratelimit, research, research_cache
 from .research_ui import ResearchPage
 
 
@@ -278,6 +278,8 @@ class MainWindow(QMainWindow):
         self.gallery = GalleryPage(self)
         self.stack.addWidget(self.gallery)
         self.research_job = None
+        self.rate = ratelimit.RateState(config.RATE_FILE)
+        self.rlog = ratelimit.ResearchLog(config.RESEARCH_LOG)
         self.research_page = ResearchPage(self)
         self.stack.addWidget(self.research_page)
         self._before_prefs = None
@@ -969,30 +971,92 @@ class MainWindow(QMainWindow):
     def close_research(self):
         self.close_prefs(force=True)
 
-    def start_research(self, username: str, opts: dict, rid: str = "", account_name: str = "") -> bool:
+    # ----- rate limiting da pesquisa
+    LOGIN_NEEDED = "Abra o Gramdesk e entre na conta antes de pesquisar."
+
+    def research_limits(self) -> ratelimit.Limits:
+        return ratelimit.Limits.from_dict(self.cfg.research_limits)
+
+    def _research_session(self, account_name: str = ""):
+        """Sessão que faria a coleta: a conta pedida (se já aberta) ou a atual."""
+        if account_name:
+            acc = next((a for a in self.cfg.accounts if a.name == account_name), None)
+            return self.sessions.get(acc.id) if acc else None
+        return self.current
+
+    def _research_cache(self, username: str) -> Path | None:
+        hours = self.research_limits().cache_hours
+        return research_cache.find_reusable(research.research_root(self.download_root), username, max_age=hours * 3600)
+
+    def research_precheck(self, username: str, opts: dict, account_name: str = "") -> tuple[str, Path | None]:
+        """Erro que impede a coleta (texto) e a pasta de cache aproveitável. Erro vazio = pode seguir."""
         if self.research_job is not None and self.research_job.state not in research.STATES_FINAL:
-            self.toast.show_message("Já existe uma pesquisa em andamento.")
-            return False
-        acc = next((a for a in self.cfg.accounts if account_name and a.name == account_name), None)
-        if acc is not None and (self.current is None or self.current.account.id != acc.id):
-            self.switch_to(acc.id)
-        if self.current is None:
-            self.toast.show_message("Abra uma conta logada para pesquisar.")
-            return False
+            return "Já existe uma pesquisa em andamento.", None
+        s = self._research_session(account_name)
+        if s is None or s.profile is None or not s.logged_in:
+            return self.LOGIN_NEEDED, None
+        cache = self._research_cache(username)
+        if cache is not None:
+            norm = research.ResearchJob.normalize_opts(opts)
+            if research_cache.plan(cache, norm)["complete"]:
+                return "", cache  # nada a buscar: não toca na rede, liberado mesmo em resfriamento
+        chk = self.rate.check(s.account.id, self.research_limits())
+        if not chk["ok"]:
+            return chk["message"], cache
+        return "", cache
+
+    def start_research(self, username: str, opts: dict, rid: str = "", account_name: str = "") -> str:
+        """Inicia a coleta. Devolve "" se começou ou a mensagem do motivo da recusa."""
+        err, cache = self.research_precheck(username, opts, account_name)
+        if err:
+            self.toast.show_message(err, 7000)
+            self.rlog.write("recusada", profile=username, reason=err[:100])
+            return err
+        s = self._research_session(account_name)
+        if s is not self.current:
+            self.switch_to(s.account.id)
         root = research.research_root(self.download_root)
+        limiter = research.Limiter(self.rate, self.research_limits(), self.rlog, s.account.id)
         try:
-            job = research.ResearchJob(self.current, username, opts, rid or security.new_request_id(), root, self)
+            job = research.ResearchJob(s, username, opts, rid or security.new_request_id(), root, limiter, cache, self)
         except ValueError:
             self.toast.show_message("Pedido de pesquisa inválido.")
-            return False
+            return "Pedido de pesquisa inválido."
         self.research_job = job
         job.progress.connect(self.research_page.update_progress)
         job.finished.connect(self._research_finished)
         job.start()
         if self.stack.currentWidget() is self.research_page:
             self.research_page.render()
-        self.toast.show_message(f"Pesquisando @{username} em segundo plano. Pode continuar usando o app.", 4000)
-        return True
+        how = "retomando a coleta salva" if cache is not None else "em segundo plano"
+        self.toast.show_message(f"Pesquisando @{username} {how}. Pode continuar usando o app.", 4000)
+        return ""
+
+    def research_snapshot(self) -> dict:
+        """Estado para a linha de comando (socket local, só o usuário). Sem cookies nem dados do site."""
+        if self.outer.currentIndex() != 0:
+            return {"proto": 1, "app": config.VERSION, "locked": True}
+        lim = self.research_limits()
+        accounts = []
+        for a in self.cfg.accounts:
+            sess = self.sessions.get(a.id)
+            accounts.append({
+                "id": a.id,
+                "name": a.name,
+                "open": sess is not None and sess.profile is not None,
+                "logged_in": bool(sess is not None and sess.profile is not None and sess.logged_in),
+                "current": self.current is not None and self.current.account.id == a.id,
+                "rate": self.rate.status(a.id, lim),
+            })
+        job = self.research_job
+        return {
+            "proto": 1,
+            "app": config.VERSION,
+            "locked": False,
+            "research_running": job is not None and job.state not in research.STATES_FINAL,
+            "accounts": accounts,
+            "limits": lim.to_dict(),
+        }
 
     def _research_finished(self, state: str, msg: str):
         job = self.research_job
@@ -1012,6 +1076,14 @@ class MainWindow(QMainWindow):
         if self.outer.currentIndex() != 0:
             self._pending_research = req
             return
+        root = research.research_root(self.download_root)
+        err, _cache = self.research_precheck(username, opts, account)
+        if err:
+            # Sem conta logada, em resfriamento ou sem cota: recusa sem nem pedir aprovação.
+            research.mark_refused(root, username, rid, err)
+            self.rlog.write("recusada", profile=username, reason=err[:100])
+            self.toast.show_message(err, 7000)
+            return
         self.raise_window()
         acc_name = account or (self.current.account.name if self.current else "conta atual")
         ok = self.confirm(
@@ -1021,9 +1093,12 @@ class MainWindow(QMainWindow):
             "Se você não pediu isso, recuse.",
             "Permitir",
         )
-        if not ok or not self.start_research(username, opts, rid, account):
-            research.mark_refused(research.research_root(self.download_root), username, rid,
-                                  "Recusada pelo usuário." if not ok else "Não foi possível iniciar.")
+        if not ok:
+            research.mark_refused(root, username, rid, "Recusada pelo usuário.")
+            return
+        err = self.start_research(username, opts, rid, account)
+        if err:
+            research.mark_refused(root, username, rid, err)
 
     def _current_folder(self) -> str:
         return security.folder_name(self.current.account.name) if self.current else ""
@@ -1054,6 +1129,9 @@ class MainWindow(QMainWindow):
             for s in self.sessions.values():
                 s.reload_scripts()
             return
+        elif key == "research_limits" and isinstance(value, dict):
+            merged = dict(self.cfg.research_limits, **value)
+            self.cfg.research_limits = ratelimit.Limits.from_dict(merged).to_dict()
         elif key == "idle_lock" and value in config.IDLE_LOCK:
             self.cfg.idle_lock = value
             self._arm_idle()
@@ -1310,6 +1388,16 @@ def _listen(win: "MainWindow"):
 
         def read():
             data = bytes(conn.readAll()).decode("utf-8", "replace").strip()[:4096]
+            if data == "STATUS":
+                # Consulta da linha de comando: responde e não mexe na janela.
+                try:
+                    reply = json.dumps(win.research_snapshot(), ensure_ascii=False)
+                except Exception as exc:  # noqa: BLE001
+                    reply = json.dumps({"proto": 1, "error": str(exc)[:200]})
+                conn.write(reply.encode("utf-8") + b"\n")
+                conn.flush()
+                conn.disconnectFromServer()
+                return
             conn.disconnectFromServer()
             if data.startswith("R "):
                 try:
@@ -1374,8 +1462,37 @@ def _selftest(app) -> int:
     return app.exec()
 
 
+def query_status(timeout_ms: int = 1500) -> dict | None:
+    """Pergunta o estado à janela aberta sem abrir nada. None = app fechado."""
+    from PyQt6.QtCore import QCoreApplication
+    from PyQt6.QtNetwork import QLocalSocket
+
+    _app = QCoreApplication.instance() or QCoreApplication(sys.argv[:1])
+    sock = QLocalSocket()
+    sock.connectToServer(SOCKET_NAME)
+    if not sock.waitForConnected(timeout_ms):
+        return None
+    sock.write(b"STATUS\n")
+    sock.flush()
+    buf = b""
+    while sock.waitForReadyRead(timeout_ms):
+        buf += bytes(sock.readAll())
+        if buf.endswith(b"\n"):
+            break
+    try:
+        data = json.loads(buf.decode("utf-8"))
+    except ValueError:
+        return {"outdated": True}
+    return data if isinstance(data, dict) else {"outdated": True}
+
+
 def main():
     os.umask(0o077)  # tudo que o app criar fica legível só pelo usuário
+    if "--query-status" in sys.argv:
+        # Usado pela CLI onde não há socket Unix acessível (Windows). Nunca abre janela.
+        st = query_status()
+        print(json.dumps(st if st is not None else {"running": False}, ensure_ascii=False), flush=True)
+        sys.exit(0 if st is not None else 3)
     if os.name == "nt":
         try:  # ícone e agrupamento corretos na barra de tarefas
             import ctypes
@@ -1392,6 +1509,10 @@ def main():
         sys.exit(_selftest(app))
     if _forward_to_running(sys.argv[1:]):
         return
+    if _research_args(sys.argv[1:]):
+        # Coleta nunca abre o app sozinha: precisa da janela aberta e da conta logada.
+        print("Abra o Gramdesk e entre na conta antes de pesquisar.", file=sys.stderr)
+        sys.exit(3)
     ui.apply_theme(app, cfg.theme, cfg.accent)
     _chromium_flags(cfg, ui.MODE)
     app.setWindowIcon(_app_icon())
@@ -1402,9 +1523,6 @@ def main():
     first_link = next((security.parse_instagram_input(a) for a in sys.argv[1:] if security.parse_instagram_input(a)), None)
     if first_link:
         win._pending_link = first_link
-    first_research = _research_args(sys.argv[1:])
-    if first_research:
-        win._pending_research = first_research
     hints = app.styleHints()
     if hasattr(hints, "colorSchemeChanged"):
         hints.colorSchemeChanged.connect(lambda _s: cfg.theme == "system" and win.set_appearance())

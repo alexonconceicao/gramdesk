@@ -113,6 +113,8 @@ class AccountSession(QObject):
         self._bridge_hits: list[float] = []
         self._pending_downloads: dict[str, dict] = {}
         self._interceptor: Interceptor | None = None
+        # Só o fato "existe cookie de sessão do Instagram"; o valor nunca é lido nem guardado.
+        self.logged_in = False
 
     # ---------- ciclo de vida ----------
     @property
@@ -146,6 +148,10 @@ class AccountSession(QObject):
         self._interceptor = Interceptor(self)
         p.setUrlRequestInterceptor(self._interceptor)
         p.downloadRequested.connect(self._on_download)
+        store = p.cookieStore()
+        store.cookieAdded.connect(lambda c: self._session_cookie(c, True))
+        store.cookieRemoved.connect(lambda c: self._session_cookie(c, False))
+        store.loadAllCookies()
         self._install_script()
         self._harden(p.settings())
 
@@ -168,6 +174,10 @@ class AccountSession(QObject):
         self.view.setPage(self.page)
         self.page.loadFinished.connect(lambda _ok: self.apply_zoom())
         self.view.setUrl(HOME)
+
+    def _session_cookie(self, cookie, added: bool):
+        if bytes(cookie.name()) == b"sessionid" and cookie.domain().lstrip(".").endswith("instagram.com"):
+            self.logged_in = added and bool(bytes(cookie.value()))
 
     @staticmethod
     def _harden(s: QWebEngineSettings):
@@ -289,6 +299,14 @@ class AccountSession(QObject):
             QWebEngineScript.ScriptWorldId.MainWorld,
         )
 
+    def release_research(self, page: GuardedPage, rid: str, ok: bool, reason: str = ""):
+        """Libera (ou nega) a próxima requisição da coleta; o ritmo é decidido pelo app."""
+        args = json.dumps([rid, bool(ok), reason])
+        page.runJavaScript(
+            f"window[{json.dumps(self._key)}]&&window[{json.dumps(self._key)}].release(...{args})",
+            QWebEngineScript.ScriptWorldId.MainWorld,
+        )
+
     def release_worker_page(self, page: GuardedPage):
         page.triggerAction(QWebEnginePage.WebAction.Stop)
         QTimer.singleShot(3000, page.deleteLater)  # deixa downloads em andamento se registrarem
@@ -336,6 +354,7 @@ class AccountSession(QObject):
         """Apaga cookies e cache já em memória; os arquivos são removidos ao reiniciar."""
         if self.profile is not None:
             self.profile.cookieStore().deleteAllCookies()
+            self.logged_in = False
             self.profile.clearHttpCache()
             self.profile.clearAllVisitedLinks()
 

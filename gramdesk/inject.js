@@ -498,23 +498,56 @@
   // ---------- pesquisa de perfil ----------
   // Coleta somente leitura, no ritmo de uma pessoa navegando, usando a sessão
   // da própria conta. Cada lote vai para o app pelo canal assinado.
+  // Ritmo: antes de CADA requisição a página pede licença ao app (fase "gate") e só
+  // segue quando o app libera (intervalo com jitter, pausas longas, tetos por minuto/hora,
+  // cota diária). Qualquer sinal de limite/desafio/login encerra a coleta na hora.
   const researchJobs = new Map();
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  const humanPause = () => sleep(1300 + Math.random() * 1700);
   const clip = (s, n) => (typeof s === 'string' ? s.slice(0, n) : '');
   const num = (v) => (typeof v === 'number' && isFinite(v) ? v : null);
+  const FLOOR_MS = 2000; // piso local entre requisições, mesmo se o app liberar antes
+  let lastApiAt = 0;
 
+  class Blocked extends Error {
+    constructor(info) { super('blocked'); this.info = info; }
+  }
+  const fatal = (e) => e instanceof Blocked || /^(limite-local|cancelado)/.test(String(e && e.message));
+
+  const gate = async (rid, job, what) => {
+    if (job.cancel) throw new Error('cancelado');
+    await new Promise((resolve, reject) => {
+      job.waiter = { resolve, reject };
+      send({ type: 'research', rid, phase: 'gate', data: { what } });
+    });
+    job.waiter = null;
+    const gap = Date.now() - lastApiAt;
+    if (gap < FLOOR_MS) await sleep(FLOOR_MS - gap);
+    if (job.cancel) throw new Error('cancelado');
+  };
+
+  const BAD_URL = /instagram\.com\/(accounts\/login|challenge|checkpoint)/;
+  const BAD_TEXT = /please wait a few minutes|try again later|tente novamente mais tarde|aguarde alguns minutos|checkpoint_required|challenge_required|login_required|feedback_required/i;
   const apiJson = async (path) => {
+    lastApiAt = Date.now();
     const r = await origFetch.call(window, path, {
       credentials: 'include',
       headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest' },
     });
-    if (r.status === 429) throw new Error('rate-limit');
-    if (r.status === 401 || r.status === 403) throw new Error('sem-acesso');
+    let text = '';
+    try { text = await r.text(); } catch (_) {}
+    let j = null;
+    try { j = JSON.parse(text.startsWith('for (;;);') ? text.slice(9) : text); } catch (_) {}
+    const failMsg = j && typeof j === 'object' && (j.status === 'fail' || j.require_login || j.checkpoint_url || j.spam)
+      ? clip(String(j.message || (j.require_login ? 'login_required' : (j.checkpoint_url ? 'checkpoint_required' : 'fail'))), 300) : '';
+    const finalUrl = r.redirected ? String(r.url || '').split('?')[0] : '';
+    if (r.status === 429 || r.status === 401 || r.status === 403 || BAD_URL.test(finalUrl) || failMsg ||
+        (!j && (BAD_TEXT.test(text.slice(0, 6000)) || /<html/i.test(text.slice(0, 600))))) {
+      throw new Blocked({ status: r.status, url: clip(finalUrl, 200), text: failMsg || clip(text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '), 400) });
+    }
     if (!r.ok) throw new Error('HTTP ' + r.status);
-    const text = await r.text();
+    if (!j) throw new Error('resposta inválida');
     ingest(text);
-    return JSON.parse(text.startsWith('for (;;);') ? text.slice(9) : text);
+    return j;
   };
 
   const tagsOf = (text, re) => [...new Set((text.match(re) || []).map((t) => t.toLowerCase()))].slice(0, 40);
@@ -595,29 +628,37 @@
   });
 
   const research = async (rid, username, opts) => {
-    const job = { cancel: false };
+    const job = { cancel: false, waiter: null };
     researchJobs.set(rid, job);
     const emit = (phase, data) => send({ type: 'research', rid, phase, data });
     const check = () => { if (job.cancel) throw new Error('cancelado'); };
+    const resume = opts.resume && typeof opts.resume === 'object' ? opts.resume : {};
     try {
-      emit('progress', { step: 'perfil' });
-      const info = await apiJson('/api/v1/users/web_profile_info/?username=' + encodeURIComponent(username));
-      const user = info && info.data && info.data.user;
-      if (!user) throw new Error('perfil não encontrado');
-      const profile = normProfile(user);
-      emit('profile', profile);
-      if (profile.is_private && !user.followed_by_viewer) {
-        emit('progress', { step: 'privado' });
+      let user = null, profile = null;
+      if (resume.profile && /^\d{1,25}$/.test(String(resume.profile.id || ''))) {
+        profile = resume.profile;
+        emit('progress', { step: 'perfil-cache' });
+      } else {
+        emit('progress', { step: 'perfil' });
+        await gate(rid, job, 'perfil');
+        const info = await apiJson('/api/v1/users/web_profile_info/?username=' + encodeURIComponent(username));
+        user = info && info.data && info.data.user;
+        if (!user) throw new Error('perfil não encontrado');
+        profile = normProfile(user);
+        emit('profile', profile);
+        if (profile.is_private && !user.followed_by_viewer) emit('progress', { step: 'privado' });
       }
 
-      // Posts: API v1 paginada; se falhar, usa os 12 que vêm no perfil.
-      const max = Math.max(1, Math.min(300, opts.posts | 0 || 60));
-      let got = 0, nextMax = '', page = 0, viaGraph = false;
+      // Posts: API v1 paginada (retoma do cursor salvo); se a 1ª página falhar, usa os 12 do perfil.
+      const have = Math.max(0, resume.have | 0);
+      const max = resume.feedDone ? 0 : Math.max(0, Math.min(300, (resume.need != null ? resume.need | 0 : (opts.posts | 0 || 60))));
+      const seen = new Set(Array.isArray(resume.codes) ? resume.codes : []);
+      let got = 0, nextMax = clip(String(resume.cursor || ''), 200), page = 0, viaGraph = false, more = max > 0;
       const collected = [];
-      while (got < max) {
+      while (got < max && more) {
         check();
-        await humanPause();
-        let items = [], more = false;
+        await gate(rid, job, 'posts');
+        let items = [];
         try {
           const q = '/api/v1/feed/user/' + profile.id + '/?count=12' + (nextMax ? '&max_id=' + encodeURIComponent(nextMax) : '');
           const j = await apiJson(q);
@@ -625,30 +666,35 @@
           more = !!j.more_available;
           nextMax = j.next_max_id || '';
         } catch (e) {
-          if (String(e.message) === 'rate-limit') throw e;
-          if (page === 0) {
+          if (fatal(e)) throw e;
+          if (page === 0 && user) {
             const edges = (user.edge_owner_to_timeline_media && user.edge_owner_to_timeline_media.edges) || [];
             items = edges.map((e) => e.node);
             viaGraph = true;
             more = false;
           } else throw e;
         }
-        const posts = items.slice(0, max - got).map(normPost);
+        const posts = items.map(normPost).filter((p) => p.code && !seen.has(p.code)).slice(0, max - got);
+        posts.forEach((p) => seen.add(p.code));
         collected.push(...posts);
         got += posts.length;
         page += 1;
-        emit('posts', { page, posts, via: viaGraph ? 'graphql' : 'v1' });
-        emit('progress', { step: 'posts', got, max });
-        if (!more || !nextMax || !posts.length) break;
+        if (!nextMax || !items.length) more = false;
+        emit('posts', { page, posts, via: viaGraph ? 'graphql' : 'v1', cursor: viaGraph ? '' : nextMax, more: more && !viaGraph });
+        emit('progress', { step: 'posts', got: have + got, max: have + max });
       }
 
       if (opts.comments) {
-        const top = collected.filter((p) => p.comments > 0).sort((a, b) => b.comments - a.comments)
-          .slice(0, Math.max(0, Math.min(25, opts.commentPosts | 0 || 15))).map((p) => p.pk);
+        const done = new Set(Array.isArray(resume.commentsDone) ? resume.commentsDone.map(String) : []);
+        const pool = new Map();
+        for (const p of (Array.isArray(resume.known) ? resume.known : []).concat(collected)) {
+          if (p && /^\d{1,25}$/.test(String(p.pk)) && p.comments > 0) pool.set(String(p.pk), p.comments);
+        }
+        const top = [...pool.entries()].sort((a, b) => b[1] - a[1])
+          .slice(0, Math.max(0, Math.min(25, opts.commentPosts | 0 || 15))).map((e) => e[0]).filter((pk) => !done.has(pk));
         for (const pk of top) {
           check();
-          if (!/^\d{1,25}$/.test(pk)) continue;
-          await humanPause();
+          await gate(rid, job, 'comentarios');
           try {
             const j = await apiJson('/api/v1/media/' + pk + '/comments/?can_support_threading=true&permalink_enabled=false');
             const comments = (j.comments || []).slice(0, 20).map((c) => ({
@@ -659,16 +705,16 @@
             }));
             emit('comments', { pk, comments });
           } catch (e) {
-            if (String(e.message) === 'rate-limit') throw e;
+            if (fatal(e)) throw e;
           }
           emit('progress', { step: 'comentarios' });
         }
       }
 
-      if (opts.highlights && profile.id) {
+      if (opts.highlights && profile.id && !resume.highlightsDone) {
         check();
-        await humanPause();
         try {
+          await gate(rid, job, 'destaques');
           const tray = await apiJson('/api/v1/highlights/' + profile.id + '/highlights_tray/');
           const list = (tray.tray || []).slice(0, 30).map((h) => ({
             id: String(h.id || ''),
@@ -677,7 +723,7 @@
           }));
           for (let i = 0; i < list.length; i += 5) {
             check();
-            await humanPause();
+            await gate(rid, job, 'destaques');
             const ids = list.slice(i, i + 5).map((h) => 'reel_ids=' + encodeURIComponent(h.id)).join('&');
             const j = await apiJson('/api/v1/feed/reels_media/?' + ids);
             const reelsById = j.reels || {};
@@ -693,13 +739,14 @@
           }
           emit('highlights', list);
         } catch (e) {
-          if (String(e.message) === 'rate-limit') throw e;
+          if (fatal(e)) throw e;
           emit('progress', { step: 'destaques-indisponiveis' });
         }
       }
       emit('done', { posts: got });
     } catch (e) {
-      emit('error', { message: String((e && e.message) || e) });
+      if (e instanceof Blocked) emit('error', Object.assign({ message: 'blocked' }, e.info));
+      else emit('error', { message: String((e && e.message) || e) });
     } finally {
       researchJobs.delete(rid);
     }
@@ -717,14 +764,25 @@
       return true;
     },
     research(rid, username, opts) {
-      if (!/^[a-f0-9]{16}$/.test(rid) || !/^[A-Za-z0-9._]{1,30}$/.test(username) || researchJobs.size > 2) return false;
+      // Concorrência 1: uma coleta por vez.
+      if (!/^[a-f0-9]{16}$/.test(rid) || !/^[A-Za-z0-9._]{1,30}$/.test(username) || researchJobs.size >= 1) return false;
       research(rid, username, opts && typeof opts === 'object' ? opts : {});
       return true;
     },
     cancelResearch(rid) {
       const j = researchJobs.get(rid);
-      if (j) j.cancel = true;
+      if (j) {
+        j.cancel = true;
+        if (j.waiter) j.waiter.reject(new Error('cancelado'));
+      }
       return !!j;
+    },
+    release(rid, ok, reason) {
+      const j = researchJobs.get(rid);
+      if (!j || !j.waiter) return false;
+      if (ok === true) j.waiter.resolve();
+      else j.waiter.reject(new Error('limite-local:' + String(reason || '').replace(/[^a-z-]/g, '').slice(0, 20)));
+      return true;
     },
     take(id) {
       const r = results.get(id);

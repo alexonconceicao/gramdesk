@@ -9,11 +9,11 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import security
+from . import ratelimit, security
 
 APP_NAME = "gramdesk"
 APP_ID = "io.github.alexonconceicao.Gramdesk"
-VERSION = "0.7.1"
+VERSION = "0.8.0"
 
 
 IS_WINDOWS = os.name == "nt"
@@ -52,6 +52,8 @@ def _dirs() -> tuple[Path, Path, Path]:
 
 CONFIG_DIR, DATA_DIR, CACHE_DIR = _dirs()
 CONFIG_FILE = CONFIG_DIR / "config.json"
+RATE_FILE = DATA_DIR / "ratelimit.json"  # resfriamento e cota da pesquisa (0600)
+RESEARCH_LOG = DATA_DIR / "research.log"  # registro local das coletas (0600)
 
 HIBERNATE_MODES = ("discard", "freeze")
 COLORS = 8
@@ -118,6 +120,7 @@ class Config:
     donation: dict = field(default_factory=dict)
     lock: dict | None = None
     pending_delete: list[str] = field(default_factory=list)
+    research_limits: dict = field(default_factory=lambda: ratelimit.Limits().to_dict())
 
     def account(self, account_id: str) -> Account | None:
         return next((a for a in self.accounts if a.id == account_id), None)
@@ -171,6 +174,7 @@ def _parse(raw: dict) -> Config:
     if isinstance(lock, dict) and lock.get("alg") == "scrypt" and isinstance(lock.get("salt"), str) and isinstance(lock.get("hash"), str):
         cfg.lock = {"alg": "scrypt", "salt": lock["salt"], "hash": lock["hash"]}
     cfg.pending_delete = [i for i in raw.get("pending_delete", []) if security.is_account_id(i) and i not in seen]
+    cfg.research_limits = ratelimit.Limits.from_dict(raw.get("research_limits")).to_dict()
     return cfg
 
 
@@ -216,6 +220,7 @@ def save(cfg: Config) -> None:
         "donation": cfg.donation,
         "lock": cfg.lock,
         "pending_delete": cfg.pending_delete,
+        "research_limits": ratelimit.Limits.from_dict(cfg.research_limits).to_dict(),
     }
     fd, tmp = tempfile.mkstemp(dir=CONFIG_DIR, prefix=".config-", suffix=".tmp")
     try:

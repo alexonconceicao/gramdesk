@@ -23,9 +23,10 @@ Não protege contra: malware rodando com seu usuário, acesso físico ao disco s
 | A05 Security Misconfiguration | Plugins, PDF, conteúdo inseguro, acesso local a URLs remotas, DNS prefetch, hyperlink auditing desligados. |
 | A06 Vulnerable Components | Flatpak sobre o runtime KDE + PyQt BaseApp do Flathub, que recebem atualizações de segurança do Chromium. |
 | A08 Data Integrity | Config validada campo a campo, gravação atômica, arquivo corrompido é isolado. |
-| A09 Logging Failures | O app não registra URLs, mensagens nem console do site. |
+| A09 Logging Failures | O app não registra URLs, mensagens nem console do site. O `research.log` (0600) guarda só eventos da coleta (início, requisições, pausas, bloqueios, fim) com campos filtrados: nada de cookies, tokens, URLs ou textos do site. |
 | Canal página → app | Botões na página falam com o app por mensagem de console assinada com token aleatório por sessão (o site não conhece o token); limite de 20 pedidos a cada 10 s; os arquivos passam pelas mesmas validações de URL/extensão/nome. |
-| Instância única | Socket local restrito ao usuário (`UserAccessOption`); só aceita links do Instagram validados. |
+| Instância única | Socket local restrito ao usuário (`UserAccessOption`); só aceita links do Instagram validados, pedidos de pesquisa (sempre com aprovação na janela) e a consulta `STATUS`, que responde só nomes das contas, se estão logadas e o estado de cota/resfriamento (nada quando o app está bloqueado). |
+| Proteção da conta (pesquisa) | Ritmo humano decidido pelo app antes de cada requisição (2,5 a 6 s com jitter, pausa longa a cada 8, teto de 8/min e 60/h, concorrência 1), cota diária (3 pesquisas, 200 requisições), parada imediata em 429/limite/checkpoint/login sem novas tentativas e resfriamento exponencial persistente por conta (30 min até 24 h, `ratelimit.json` 0600). A coleta só começa com a janela aberta e a conta logada; a CLI nunca abre o app. Detecção de login usa só a existência do cookie de sessão, nunca o valor. |
 | A10 SSRF | Downloads restritos a `*.cdninstagram.com` e `*.fbcdn.net`, porta 443, sem credenciais na URL. |
 | MASVS-STORAGE / PRIVACY | Sem telemetria; remoção de conta apaga cookies/cache e o perfil do disco. |
 

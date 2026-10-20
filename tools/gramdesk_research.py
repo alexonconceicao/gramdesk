@@ -2,6 +2,8 @@
 """gramdesk-research: pesquisa um perfil do Instagram pelo Gramdesk e analisa com o Claude.
 
 Fluxo:
+  0. confere se o Gramdesk está aberto, com a conta logada, fora de resfriamento e com cota
+     (nunca abre o app sozinho; sem isso sai com código diferente de zero);
   1. pede a coleta ao Gramdesk aberto (o app pede aprovação na tela);
   2. espera a pasta Downloads/Gramdesk/Pesquisas/<perfil>-<data> ficar pronta;
   3. calcula estatísticas e paleta de cores (script);
@@ -16,6 +18,10 @@ Uso:
                     [--contract ARQUIVO --contract-output nome.json]
   gramdesk-research --analyze PASTA [--no-preview] [--model MODELO] [--contract ARQUIVO]
   gramdesk-research --list
+  gramdesk-research --status [--account NOME]
+
+Códigos de saída: 0 ok · 1 erro na coleta/análise · 3 app fechado, bloqueado ou conta sem login ·
+4 resfriamento ativo (o Instagram pediu pausa) · 5 cota diária atingida · 6 já há pesquisa em andamento.
 
 Só depende da biblioteca padrão do Python; usa Pillow para a paleta se estiver instalado.
 """
@@ -24,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import socket
 import datetime as dt
 import json
 import os
@@ -39,6 +46,8 @@ from pathlib import Path
 APP_ID = "io.github.alexonconceicao.Gramdesk"
 FINAL = ("done", "error", "cancelled", "refused")
 USER_RE = re.compile(r"^@?([A-Za-z0-9._]{1,30})$")
+LOGIN_NEEDED = "Abra o Gramdesk e entre na conta antes de pesquisar."
+EXIT_APP, EXIT_COOLDOWN, EXIT_QUOTA, EXIT_BUSY = 3, 4, 5, 6
 
 
 # ---------------------------------------------------------------- caminhos
@@ -77,8 +86,138 @@ def gramdesk_cmd() -> list[str]:
     sys.exit("Gramdesk não encontrado (nem Flatpak nem comando gramdesk).")
 
 
+# ---------------------------------------------------------------- app aberto?
+def socket_paths() -> list[Path]:
+    """Socket de instância única do Gramdesk (mesmo caminho que o app usa)."""
+    env = os.environ.get("GRAMDESK_SOCKET", "")
+    if env:
+        return [Path(env)]
+    runtime = os.environ.get("XDG_RUNTIME_DIR", "")
+    if not runtime:
+        return []
+    return [Path(runtime) / "app" / APP_ID / "gramdesk.sock", Path(runtime) / "gramdesk.sock"]
+
+
+def _talk(payload: bytes, want_reply: bool, timeout: float = 3.0):
+    """Fala com o app pelo socket. None = app fechado; b'' = conectou mas não respondeu."""
+    if not hasattr(socket, "AF_UNIX"):
+        return None
+    for path in socket_paths():
+        if not path.exists():
+            continue
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sk:
+                sk.settimeout(timeout)
+                sk.connect(str(path))
+                sk.sendall(payload)
+                if not want_reply:
+                    return b"ok"
+                buf = b""
+                while not buf.endswith(b"\n") and len(buf) < 1_000_000:
+                    try:
+                        chunk = sk.recv(65536)
+                    except socket.timeout:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                return buf
+        except OSError:
+            continue
+    return None
+
+
+def query_app() -> dict | None:
+    """Estado do Gramdesk aberto. None = fechado; {'outdated': True} = versão sem suporte a consulta."""
+    if os.name == "nt":
+        try:
+            r = subprocess.run(gramdesk_cmd() + ["--query-status"], capture_output=True, text=True, timeout=20)
+            data = json.loads(r.stdout or "{}")
+        except (OSError, ValueError, subprocess.SubprocessError, SystemExit):
+            return None
+        return data if isinstance(data, dict) and data.get("running", True) else None
+    raw = _talk(b"STATUS\n", want_reply=True)
+    if raw is None:
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return {"outdated": True}
+    return data if isinstance(data, dict) else {"outdated": True}
+
+
+def pick_account(st: dict, name: str = "") -> dict | None:
+    accs = [a for a in st.get("accounts") or [] if isinstance(a, dict)]
+    if name:
+        return next((a for a in accs if a.get("name") == name), None)
+    return next((a for a in accs if a.get("current")), None)
+
+
+def fmt_until(ts: float) -> str:
+    now = time.time()
+    fmt = "%H:%M" if time.strftime("%Y%m%d", time.localtime(ts)) == time.strftime("%Y%m%d", time.localtime(now)) else "%d/%m %H:%M"
+    return time.strftime(fmt, time.localtime(ts))
+
+
+def evaluate(st: dict | None, account: str = "") -> tuple[int, str, dict | None]:
+    """Decide se a coleta pode começar: (código de saída, mensagem, conta)."""
+    if st is None:
+        return EXIT_APP, LOGIN_NEEDED, None
+    if st.get("outdated") or st.get("proto") != 1:
+        return EXIT_APP, "O Gramdesk aberto é de uma versão antiga. Feche e abra o app de novo.", None
+    if st.get("locked"):
+        return EXIT_APP, "O Gramdesk está bloqueado. Desbloqueie o app e entre na conta antes de pesquisar.", None
+    acc = pick_account(st, account)
+    if acc is None or not acc.get("logged_in"):
+        return EXIT_APP, LOGIN_NEEDED, acc
+    if st.get("research_running"):
+        return EXIT_BUSY, "Já existe uma pesquisa em andamento no Gramdesk.", acc
+    rate = acc.get("rate") or {}
+    if not rate.get("ok", True):
+        until = rate.get("until") or 0
+        code = EXIT_COOLDOWN if rate.get("reason") == "cooldown" else EXIT_QUOTA
+        msg = rate.get("message") or "Limite atingido."
+        if until and "aguarde até" not in msg.lower():
+            msg += f" Aguarde até {fmt_until(until)}."
+        return code, msg, acc
+    return 0, "", acc
+
+
+def preflight(username: str, account: str = "") -> dict:
+    code, msg, acc = evaluate(query_app(), account)
+    if code:
+        # Pesquisa já completa no cache não toca na rede: o app libera mesmo em resfriamento/cota.
+        if code in (EXIT_COOLDOWN, EXIT_QUOTA) and cached_complete(username):
+            print(f"Aviso: {msg}\nUsando a coleta recente do cache (sem acessar o Instagram).")
+            return acc or {}
+        print(msg, file=sys.stderr)
+        sys.exit(code)
+    return acc or {}
+
+
+def cached_complete(username: str) -> bool:
+    """Existe coleta concluída sem erro do perfil nas últimas 24 h (heurística da CLI; o app decide)."""
+    root = research_root()
+    for st in root.glob(f"{username}-*/status.json"):
+        try:
+            d = json.loads(st.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        ts = d.get("collected_at") or d.get("updated_at") or 0
+        if d.get("username") == username and d.get("state") == "done" and not d.get("error") and time.time() - ts < 24 * 3600:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------- coleta
 def request_collect(username: str, args) -> str:
     rid = secrets.token_hex(8)
+    opts = {"posts": args.posts, "comments": not args.no_comments, "highlights": not args.no_highlights, "videos": args.videos}
+    if os.name != "nt":
+        req = {"username": username, "rid": rid, "account": args.account, "opts": opts}
+        if _talk(("R " + json.dumps(req)).encode()[:4096] + b"\n", want_reply=False) is None:
+            sys.exit(LOGIN_NEEDED)
+        return rid
     cmd = gramdesk_cmd() + ["--research", username, "--rid", rid, "--posts", str(args.posts)]
     if args.account:
         cmd += ["--account", args.account]
@@ -88,13 +227,73 @@ def request_collect(username: str, args) -> str:
         cmd.append("--no-highlights")
     if args.videos:
         cmd.append("--videos")
-    # Se o app já está aberto, este processo só entrega o pedido e sai; senão vira a janela principal.
-    if os.name == "nt":
-        flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
-    else:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    # Só entrega o pedido ao app aberto; se não houver janela, o app sai sem abrir nada.
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        sys.exit(LOGIN_NEEDED)
     return rid
+
+
+# ---------------------------------------------------------------- status
+def offline_status() -> dict:
+    """Lê o estado gravado em disco quando o app está fechado (só leitura)."""
+    cands = []
+    home = os.environ.get("GRAMDESK_HOME", "")
+    if home:
+        cands.append((Path(home) / "data", Path(home) / "config"))
+    flat = Path.home() / ".var" / "app" / APP_ID
+    cands.append((flat / "data" / "gramdesk", flat / "config" / "gramdesk"))
+    cands.append((Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share") / "gramdesk",
+                  Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "gramdesk"))
+    for data, cfg in cands:
+        rate = data / "ratelimit.json"
+        if rate.exists():
+            return {"rate": load(rate.parent, rate.name, {}), "config": load(cfg, "config.json", {}), "path": str(rate)}
+    return {}
+
+
+def print_status(account: str = "") -> int:
+    st = query_app()
+    code, msg, acc = evaluate(st, account)
+    if st is not None and not st.get("outdated") and not st.get("locked"):
+        lim = st.get("limits") or {}
+        print(f"Gramdesk {st.get('app', '?')} aberto. Pesquisa em andamento: {'sim' if st.get('research_running') else 'não'}.")
+        print(f"Limites: {lim.get('daily_researches')} pesquisas/dia, {lim.get('daily_items')} itens/dia, "
+              f"{lim.get('per_hour')}/hora, {lim.get('per_minute')}/min, {lim.get('min_delay')} a {lim.get('max_delay')} s "
+              f"entre requisições, pausa longa a cada {lim.get('long_every')}, cache {lim.get('cache_hours')} h.")
+        for a in st.get("accounts") or []:
+            r = a.get("rate") or {}
+            flag = " (atual)" if a.get("current") else ""
+            login = "logada" if a.get("logged_in") else ("aberta, sem login" if a.get("open") else "não aberta")
+            line = (f"  {a.get('name')}{flag}: {login} · hoje {r.get('researches_today', 0)} pesquisas, "
+                    f"{r.get('items_today', 0)} itens · última hora {r.get('items_last_hour', 0)}")
+            if r.get("level"):
+                line += f" · nível de resfriamento {r['level']}"
+            print(line)
+            if not r.get("ok", True):
+                print(f"    {r.get('message')}")
+    else:
+        off = offline_status()
+        print("Gramdesk fechado." if st is None else "Gramdesk aberto, mas sem consulta disponível (bloqueado ou versão antiga).")
+        if off:
+            names = {a.get("id"): a.get("name") for a in (off["config"].get("accounts") or []) if isinstance(a, dict)}
+            lim = off["config"].get("research_limits") or {}
+            now = time.time()
+            today = time.strftime("%Y-%m-%d")
+            for acc_id, e in ((off["rate"].get("accounts") or {}).items()):
+                if not isinstance(e, dict):
+                    continue
+                same = e.get("day") == today
+                line = (f"  {names.get(acc_id, acc_id)}: hoje {e.get('researches', 0) if same else 0} pesquisas, "
+                        f"{e.get('items', 0) if same else 0} itens")
+                cu = e.get("cooldown_until") or 0
+                if cu > now:
+                    line += f" · resfriamento até {fmt_until(cu)} (nível {e.get('level', 0)})"
+                elif same and e.get("researches", 0) >= lim.get("daily_researches", 3):
+                    line += " · cota diária de pesquisas atingida"
+                print(line)
+    print(("Pode pesquisar." if code == 0 else msg))
+    return code
 
 
 def find_by_rid(rid: str) -> Path | None:
@@ -111,7 +310,7 @@ def find_by_rid(rid: str) -> Path | None:
 
 
 def wait_collect(rid: str, timeout_min: int) -> Path:
-    print("Pedido enviado ao Gramdesk. Aprove a pesquisa na janela do app.", flush=True)
+    print("Pedido enviado ao Gramdesk aberto. Aprove a pesquisa na janela do app.", flush=True)
     deadline = time.time() + timeout_min * 60
     folder = None
     last = ""
@@ -129,9 +328,20 @@ def wait_collect(rid: str, timeout_min: int) -> Path:
                 last = line
             if st.get("state") in FINAL:
                 if st.get("state") != "done":
-                    sys.exit(f"Coleta não concluída: {st.get('state')} · {st.get('error') or st.get('message')}")
+                    why = st.get("error") or st.get("message") or ""
+                    print(f"Coleta não concluída: {st.get('state')} · {why}", file=sys.stderr)
+                    if st.get("block") or "resfriamento" in why.lower():
+                        sys.exit(EXIT_COOLDOWN)
+                    if "cota diária" in why.lower():
+                        sys.exit(EXIT_QUOTA)
+                    if why == LOGIN_NEEDED:
+                        sys.exit(EXIT_APP)
+                    sys.exit(1)
                 if st.get("error"):
                     print(f"Aviso: {st['error']}")
+                if st.get("block"):
+                    # Coleta parcial por bloqueio: dados salvos, mas a conta entrou em resfriamento.
+                    print("A conta entrou em resfriamento; veja gramdesk-research --status.")
                 return folder
         time.sleep(2)
     sys.exit("Tempo esgotado esperando a coleta.")
@@ -407,12 +617,15 @@ def main() -> None:
     ap.add_argument("--contract", metavar="ARQUIVO", help="formato extra de saída (texto/JSON descrevendo o arquivo a gerar)")
     ap.add_argument("--contract-output", default="landing.json", metavar="NOME.json")
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--status", action="store_true", help="mostra resfriamento, cota e limites por conta")
     ap.add_argument("--timeout", type=int, default=45, help="minutos esperando a coleta")
     args = ap.parse_args()
 
     if args.list:
         list_all()
         return
+    if args.status:
+        sys.exit(print_status(args.account))
     contract = Path(args.contract) if args.contract else None
     if contract is not None and not contract.is_file():
         sys.exit("--contract: arquivo não encontrado")
@@ -428,6 +641,7 @@ def main() -> None:
             sys.exit("Perfil inválido.")
         m = m2
     username = m.group(1)
+    preflight(username, args.account)
     rid = request_collect(username, args)
     folder = wait_collect(rid, args.timeout)
     print(f"Coleta pronta: {folder}")

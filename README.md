@@ -34,7 +34,29 @@ ln -s "$PWD/tools/gramdesk_research.py" ~/.local/bin/gramdesk-research
 gramdesk-research @perfil --posts 60            # coleta (aprovação na janela) + análise
 gramdesk-research --analyze ~/Downloads/Gramdesk/Pesquisas/perfil-AAAAMMDD-HHMMSS
 gramdesk-research --list
+gramdesk-research --status                      # resfriamento, cota e limites por conta
 ```
+
+A CLI só funciona com o Gramdesk **já aberto e com a conta logada**: ela consulta o app pelo socket local e, se não estiver, sai com `Abra o Gramdesk e entre na conta antes de pesquisar.` (código 3) sem abrir nada. Outros códigos: 4 resfriamento ativo, 5 cota diária atingida, 6 pesquisa já em andamento.
+
+### Política de ritmo (rate limiting)
+
+Para nunca martelar o Instagram e proteger a conta, cada requisição da coleta precisa de licença do app:
+
+| Regra | Padrão |
+|---|---|
+| Intervalo entre requisições | 2,5 a 6 s, aleatório, uma por vez (concorrência 1) |
+| Pausa longa | 20 a 45 s a cada 8 requisições |
+| Teto por conta | 8 por minuto, 60 por hora |
+| Cota diária por conta | 3 pesquisas e 200 requisições |
+| Downloads de mídia | um por vez, 0,4 a 1,2 s entre arquivos |
+| Cache | pesquisa do mesmo perfil nas últimas 24 h é reaproveitada; só o que falta é buscado |
+
+"Requisição" = uma chamada à API do Instagram (perfil, página de 12 posts, comentários de um post, destaques). Cota e ritmo ficam em Preferências > Pesquisa de perfil.
+
+Se o Instagram responder com sinal de limite (HTTP 429, "Please wait a few minutes", "Tente novamente mais tarde", `feedback_required`), checkpoint/challenge ou pedido de login, a coleta **para na hora, sem novas tentativas**, salva o que já tinha e a conta entra em resfriamento: 30 min, 1 h, 2 h, 4 h... até 24 h a cada novo bloqueio, zerando após uma coleta bem-sucedida. Enquanto durar, app e CLI recusam nova coleta e mostram até que horas aguardar. Coletas interrompidas (bloqueio ou teto por hora) são retomadas do ponto em que pararam na próxima pesquisa do mesmo perfil.
+
+O estado fica em `ratelimit.json` e o registro das coletas em `research.log` (JSON por linha, sem cookies, tokens, URLs ou textos do site), ambos com permissão 600 no diretório de dados do app (`~/.var/app/io.github.alexonconceicao.Gramdesk/data/gramdesk/` no Flatpak).
 
 Saída em `~/Downloads/Gramdesk/Pesquisas/<perfil>-<data>/`:
 
@@ -48,7 +70,8 @@ Saída em `~/Downloads/Gramdesk/Pesquisas/<perfil>-<data>/`:
 
 Segurança:
 - Pedidos vindos da linha de comando sempre pedem aprovação na janela.
-- A coleta roda numa página oculta da mesma sessão, com pausas aleatórias, e para se o Instagram pedir para ir mais devagar.
+- A coleta roda numa página oculta da mesma sessão, seguindo a política de ritmo acima, e para no primeiro sinal de limite.
+- A linha de comando nunca abre o app nem inicia coleta sem a janela aberta e a conta logada.
 - A análise usa o Claude Code em `--restricted` (sem terminal, sem rede, arquivos só da pasta). Legendas e comentários são tratados como conteúdo não confiável.
 
 ## Instalação
@@ -58,7 +81,7 @@ Segurança:
 Baixe `gramdesk-<versão>.flatpak` na página de [Releases](https://github.com/alexonconceicao/gramdesk/releases) e instale:
 
 ```bash
-flatpak install --user gramdesk-0.7.1.flatpak
+flatpak install --user gramdesk-0.8.0.flatpak
 flatpak run io.github.alexonconceicao.Gramdesk
 ```
 
