@@ -143,6 +143,22 @@ def media_ext(url: str) -> str | None:
     return ext if ext in MEDIA_EXTS else None
 
 
+def media_magic_ok(head: bytes, ext: str) -> bool:
+    """Confere a assinatura do arquivo baixado: mp4/heic têm 'ftyp' no byte 4, jpg começa com FF D8 etc.
+    Evita salvar como .mp4 uma página de erro ou um corpo vazio."""
+    head = bytes(head or b"")[:16]
+    ext = (ext or "").lower()
+    if ext in (".mp4", ".m4a", ".heic"):
+        return head[4:8] == b"ftyp"
+    if ext in (".jpg", ".jpeg"):
+        return head[:2] == b"\xff\xd8"
+    if ext == ".png":
+        return head[:8] == b"\x89PNG\r\n\x1a\n"
+    if ext == ".webp":
+        return head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+    return bool(head)
+
+
 def safe_filename(hint: str, ext: str) -> str:
     """Nome de arquivo sem separadores, sem ponto inicial, tamanho limitado."""
     if ext not in MEDIA_EXTS:

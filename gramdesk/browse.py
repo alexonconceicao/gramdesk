@@ -33,7 +33,7 @@ RESERVED = {
 _USER = r"[A-Za-z0-9._]{1,30}"
 _CODE = r"[A-Za-z0-9_-]{5,64}"
 _PROFILE_PATH = re.compile(rf"^/({_USER})/(?:(reels|tagged)/)?$")
-_POST_PATH = re.compile(rf"^/(?:({_USER})/)?(p|reel|tv)/({_CODE})/?$")
+_POST_PATH = re.compile(rf"^/(?:({_USER})/)?(p|reel|reels|tv)/({_CODE})/?$")
 _PROFILE_ALT = re.compile(r"profile picture|foto do perfil|foto de perfil|avatar", re.I)
 _CAROUSEL_LABEL = re.compile(r"^(carousel|carrossel|sequência|álbum)$", re.I)
 _REEL_LABEL = re.compile(r"^(clip|clipe|reel|reels)$", re.I)
@@ -61,9 +61,10 @@ def target_of(text: str) -> dict | None:
         user, kind, code = m.group(1) or "", m.group(2), m.group(3)
         if user and user.lower() in RESERVED:
             return None
-        seg = "reel" if kind == "reel" else "p"
+        reel = kind in ("reel", "reels")  # o site às vezes troca /reel/X/ por /reels/X/
+        seg = "reel" if reel else "p"
         return {"kind": "post", "url": f"https://www.instagram.com/{seg}/{code}/", "user": user, "code": code,
-                "media": "reel" if kind == "reel" else "post"}
+                "media": "reel" if reel else "post"}
     m = _PROFILE_PATH.match(path)
     if m and m.group(1).lower() not in RESERVED:
         tab = f"{m.group(2)}/" if m.group(2) else ""
@@ -293,7 +294,7 @@ def parse_grid(html: str, owner: str = "") -> list[dict]:
         seen.add(code)
         labels = _labels(a)
         kind = "image"
-        if seg == "reel" or any(_REEL_LABEL.match(x) for x in labels):
+        if seg in ("reel", "reels") or any(_REEL_LABEL.match(x) for x in labels):
             kind = "reel"
         elif any(_CAROUSEL_LABEL.match(x) for x in labels):
             kind = "carousel"
@@ -302,7 +303,7 @@ def parse_grid(html: str, owner: str = "") -> list[dict]:
         img = a.find("img")
         thumb = media_of(img)["url"] if img is not None else ""
         out.append({
-            "url": f"https://www.instagram.com/{'reel' if seg == 'reel' else 'p'}/{code}/",
+            "url": f"https://www.instagram.com/{'reel' if seg in ('reel', 'reels') else 'p'}/{code}/",
             "code": code,
             "kind": kind,
             "visible": a.get("data-gd-vis") == "1",
@@ -356,6 +357,8 @@ def parse_post(html: str, url: str = "", meta: dict | None = None, index: dict |
     media, seen = [], set()
     for el in root.iter():
         if el.tag == "video" or (el.tag == "img" and _is_content_img(el)):
+            if _links_elsewhere(el, tgt.get("code", "")):
+                continue  # capa de post/reel sugerido na mesma página
             m = media_of(el)
             key = m["url"] if not m["blob"] else m["url"] + m.get("poster", "")
             if not m["url"] or key in seen:
@@ -368,6 +371,10 @@ def parse_post(html: str, url: str = "", meta: dict | None = None, index: dict |
     # <img> de capa que vem antes do <video>
     media = [m for m in media if not (m["kind"] == "image" and any(
         v["kind"] == "video" and v.get("poster") and _same_file(v["poster"], m["url"]) for v in media))]
+
+    # Reel é um vídeo só: imagens que sobrarem na página não são dele (a capa vem dos dados do post).
+    if (tgt.get("media") == "reel" or index.get("type") == "reel") and any(m["kind"] == "video" for m in media):
+        media = [m for m in media if m["kind"] == "video"][:1]
 
     labels = _labels(root)
     has_next = any(_NEXT_LABEL.match(x) for x in labels)
@@ -403,6 +410,16 @@ def parse_post(html: str, url: str = "", meta: dict | None = None, index: dict |
     visible = [m for m in media if m.get("visible")] or media
     best = max(visible, key=lambda m: (m["width"] or 0) * (m["height"] or 1), default=None)
     owner = _owner_from(root) or str(index.get("user") or "") or tgt.get("user", "")
+    sources = index_sources(index) if not index.get("code") or index.get("code") == tgt.get("code") else []
+    with_url = [x for x in sources if x["url"]]
+    top = max(with_url, key=lambda x: x["width"] * x["height"], default=None)
+    # Capa do próprio vídeo (image_versions2/display_url dos dados do post), com URL do CDN.
+    poster = ""
+    if kind in ("reel", "video") and sources and sources[0]["kind"] == "video":
+        poster = sources[0]["thumb"]
+    for m in media:
+        if m["kind"] == "video" and not security.is_safe_media_url(m.get("poster") or ""):
+            m["poster"] = poster
     return {
         "url": tgt.get("url", url),
         "code": tgt.get("code", ""),
@@ -417,7 +434,71 @@ def parse_post(html: str, url: str = "", meta: dict | None = None, index: dict |
         "best_is_stream": bool(best and best["blob"]),
         "items_total": total or (carousel_lis if kind == "carousel" else 1) or len(media),
         "media": media[:20],
+        # Maior arquivo baixável (URL direta do CDN, nunca blob:), dos dados que a página já recebeu.
+        "best": dict(top, source="page-data") if top else None,
+        "poster": poster,
+        "sources": sources[:20],
     }
+
+
+# ---------------------------------------------------------------- fontes baixáveis
+VIDEO_NO_URL = "Vídeo sem URL baixável; tente o botão de baixar na janela do Gramdesk."
+
+
+def index_sources(index: dict | None) -> list[dict]:
+    """Mídias do post com URL direta (mp4/jpg do CDN), a partir do índice que a página já recebeu.
+
+    O player do Instagram toca vídeo por stream (blob:, MSE); isso não é baixável. Aqui vale só URL
+    https de CDN de mídia: em vídeo, a versão progressiva (mp4 com áudio) de maior resolução de
+    video_versions. Item sem URL segura fica com url "" (ex.: vídeo cujos dados não trouxeram versões).
+    """
+    out = []
+    media = index.get("media") if isinstance(index, dict) else None
+    for i, m in enumerate(media if isinstance(media, list) else [], 1):
+        if not isinstance(m, dict) or i > 50:
+            continue
+        kind = "video" if m.get("kind") == "video" else "image"
+        cands = []
+        for v in m.get("versions") if isinstance(m.get("versions"), list) else []:
+            if isinstance(v, dict):
+                cands.append((str(v.get("url") or ""), _int(v.get("width")), _int(v.get("height"))))
+        cands.append((str(m.get("url") or ""), _int(m.get("width")), _int(m.get("height"))))
+        want = ".mp4" if kind == "video" else None
+        ok = [c for c in cands if security.is_safe_media_url(c[0]) and
+              (want is None or security.media_ext(c[0]) == want) and
+              (want is not None or security.media_ext(c[0]) != ".mp4")]
+        url, w, h = max(ok, key=lambda c: c[1] * c[2], default=("", _int(m.get("width")), _int(m.get("height"))))
+        thumb = str(m.get("thumb") or "")
+        out.append({"index": i, "kind": kind, "url": url, "width": w, "height": h,
+                    "thumb": thumb if security.is_safe_media_url(thumb) else ""})
+    return out
+
+
+def pick_source(sources: list, index: int | None) -> tuple[dict | None, int, str]:
+    """Escolhe UM item das fontes do índice. Devolve (fonte, total, erro); fonte None com erro vazio
+    quando o item existe mas não tem URL (aí o app pode tentar o mecanismo do botão)."""
+    sources = [s for s in sources if isinstance(s, dict)]
+    total = len(sources)
+    if not total:
+        return None, 0, ""
+    if index is None:
+        if total > 1:
+            return None, total, f"Carrossel com {total} itens: use --index 1..{total} (um item por chamada)."
+        index = 1
+    if not 1 <= index <= total:
+        return None, total, f"Índice fora do intervalo: o post tem {total} item(ns)."
+    src = sources[index - 1]
+    return (src if src.get("url") else None), total, ""
+
+
+def _links_elsewhere(el: Node, code: str) -> bool:
+    """A mídia está dentro de um link para OUTRO post/reel (sugestão, "mais reels", "mais posts de")?"""
+    for a in el.ancestors():
+        if a.tag == "a":
+            hit = _post_href(a.get("href"))
+            if hit and hit[2] != code:
+                return True
+    return False
 
 
 def _same_file(a: str, b: str) -> bool:

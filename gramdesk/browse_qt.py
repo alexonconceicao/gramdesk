@@ -23,7 +23,7 @@ from . import browse, ratelimit, security
 OK, ERROR, APP, COOLDOWN, QUOTA, BUSY, REFUSED = 0, 1, 3, 4, 5, 6, 7
 LOAD_TIMEOUT_MS = 30_000
 READY_TIMEOUT_S = 15.0
-DOWNLOAD_TIMEOUT_MS = 180_000
+DOWNLOAD_TIMEOUT_MS = 90_000  # um arquivo, uma requisição; sem resposta em 90 s, desiste
 LOGIN_NEEDED = "Abra o Gramdesk e entre na conta antes de navegar."
 
 
@@ -312,43 +312,70 @@ class _Ctx:
         self.download(info)
 
     def download(self, info: dict):
+        """Baixa UM arquivo do post aberto.
+
+        1º: URL direta (mp4 progressivo de maior resolução / imagem original) dos dados que a página
+        já recebeu, sem nenhuma requisição ao Instagram. 2º, só se esses dados não trouxerem a URL:
+        o mesmo mecanismo do botão de download, que pode fazer UMA consulta à API (dentro desta
+        mesma ação, já contada e no ritmo). Vídeo nunca cai para a capa nem para o stream blob:.
+        """
+        srcs = info.get("sources") or []
+        pos = (self.index or 1) - 1
+        wants_video = info.get("type") in ("reel", "video") or (0 <= pos < len(srcs) and srcs[pos].get("kind") == "video")
+        src, total, err = browse.pick_source(srcs, self.index)
+        if err:
+            self.finish(ERROR, err, {"items_total": total})
+            return
+        if src is not None:
+            self.fetch(info, src, total, "page-data")
+            return
+
         def got(res: dict):
             if self.done:
                 return
+            calls = res.get("api") if isinstance(res.get("api"), int) else 0
+            if calls:
+                self.win.rlog.write("nav-api", account=self.acc_name, action=self.action, requests=calls)
             if not res.get("ok"):
                 self.finish(ERROR, "Falha ao localizar a mídia: " + str(res.get("error", ""))[:160])
                 return
-            f, total, err = browse.pick_file(res.get("files") or [], self.index)
+            f, n, err2 = browse.pick_file(res.get("files") or [], self.index)
             if f is None:
-                self.finish(ERROR, err, {"items_total": total})
+                self.finish(ERROR, browse.VIDEO_NO_URL if wants_video and n == 0 else err2, {"items_total": n})
                 return
-            idx = self.index or 1
-            url = f["url"]
-            ext = security.media_ext(url)
-            owner = info.get("owner") or self.target.get("user") or str(f.get("name", "")).split("_post_")[0]
-            folder = security.folder_name(owner or "instagram")
-            target_dir = self.win.download_root / security.folder_name(self.acc_name) / folder
-            name = browse.file_name(folder, info["code"], ext, idx, total)
-            path = target_dir / name
-            out = {"path": str(path), "name": name, "index": idx, "items_total": total, "owner": owner,
-                   "code": info["code"], "type": info["type"], "kind": "video" if ext == ".mp4" else "image"}
-            if path.exists():
-                self.finish(OK, "Já baixado antes.", dict(out, already=True))
+            if wants_video and security.media_ext(f["url"]) != ".mp4":
+                self.finish(ERROR, browse.VIDEO_NO_URL, {"items_total": n})
                 return
-            timer = QTimer(self.ctl, singleShot=True, interval=DOWNLOAD_TIMEOUT_MS)
-
-            def done(ok: bool):
-                timer.stop()
-                if self.done:
-                    return
-                if ok and path.exists():
-                    self.win.gallery.schedule_reload()
-                    self.finish(OK, f"Salvo: {name}", dict(out, already=False))
-                else:
-                    self.finish(ERROR, f"Download falhou: {name}")
-
-            timer.timeout.connect(lambda: self.finish(ERROR, "Tempo esgotado no download."))
-            timer.start()
-            self.s.queue_file(url, target_dir, name, done)
+            self.fetch(info, {"url": f["url"], "kind": f.get("kind") or "", "width": f.get("w") or 0,
+                              "height": f.get("h") or 0}, n, "button")
 
         self.s.current_files(got)
+
+    def fetch(self, info: dict, src: dict, total: int, source: str):
+        idx = self.index or 1
+        url = src["url"]
+        ext = security.media_ext(url)
+        owner = info.get("owner") or self.target.get("user") or "instagram"
+        folder = security.folder_name(owner)
+        target_dir = self.win.download_root / security.folder_name(self.acc_name) / folder
+        name = browse.file_name(folder, info["code"], ext, idx, total)
+        path = target_dir / name
+        out = {"path": str(path), "name": name, "index": idx, "items_total": total, "owner": owner,
+               "code": info["code"], "type": info["type"], "kind": "video" if ext == ".mp4" else "image",
+               "width": int(src.get("width") or 0), "height": int(src.get("height") or 0), "source": source}
+        if path.exists():
+            self.finish(OK, "Já baixado antes.", dict(out, already=True))
+            return
+
+        def done(ok: bool, msg: str):
+            if self.done:
+                return
+            if ok and path.exists():
+                self.win.gallery.schedule_reload()
+                self.finish(OK, f"Salvo: {name}", dict(out, already=False))
+            else:
+                self.win.rlog.write("nav-download-falhou", account=self.acc_name, reason=msg[:160])
+                self.finish(ERROR, f"Download falhou: {name}. {msg}".strip())
+
+        if not self.s.fetch_media(url, path, done, timeout_ms=DOWNLOAD_TIMEOUT_MS):
+            self.finish(ERROR, browse.VIDEO_NO_URL if out["kind"] == "video" else "URL de mídia não permitida.")

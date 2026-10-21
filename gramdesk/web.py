@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 from importlib import resources
@@ -11,6 +12,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QObject, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtNetwork import QNetworkAccessManager, QNetworkCookieJar, QNetworkReply, QNetworkRequest
 from PyQt6.QtWebEngineCore import (
     QWebEngineDownloadRequest,
     QWebEnginePage,
@@ -96,6 +98,143 @@ class GuardedPage(QWebEnginePage):
             self.bridgeMessage.emit(message[len(self.bridge_prefix):])
 
 
+class MediaFetch(QObject):
+    """Baixa UM arquivo de mídia do CDN numa única requisição GET, direto para o disco.
+
+    Não passa pelo gerenciador de downloads do Chromium (page.download), que depende de um
+    downloadRequested com a URL idêntica; aqui o resultado é sempre explícito: concluído, erro
+    HTTP, resposta que não é mídia ou tempo esgotado. Usa o mesmo User-Agent do perfil da conta
+    e os cookies que o perfil tem para os hosts de mídia; segue redirecionamento só para eles.
+    """
+
+    MAX_BYTES = 1024 * 1024 * 1024
+    STALL_MS = 20_000
+
+    def __init__(self, nam: QNetworkAccessManager, url: str, path: Path, done, *, user_agent: str = "",
+                 timeout_ms: int = 90_000, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.tmp = path.with_name("." + path.name + ".part")
+        self.done_cb = done
+        self.written = 0
+        self.finished_ = False
+        self.fh = None
+        req = QNetworkRequest(QUrl(url))
+        if user_agent:
+            req.setHeader(QNetworkRequest.KnownHeaders.UserAgentHeader, user_agent)
+        req.setRawHeader(b"Referer", b"https://www.instagram.com/")
+        req.setRawHeader(b"Accept", b"*/*")
+        req.setAttribute(QNetworkRequest.Attribute.RedirectPolicyAttribute,
+                         QNetworkRequest.RedirectPolicy.UserVerifiedRedirectPolicy)
+        req.setMaximumRedirectsAllowed(3)
+        req.setTransferTimeout(self.STALL_MS)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.fh = open(self.tmp, "wb")
+        except OSError as exc:
+            QTimer.singleShot(0, lambda: self._end(False, f"Não deu para gravar em {path.parent}: {exc}"))
+            self.reply = None
+            return
+        self.timer = QTimer(self, singleShot=True, interval=timeout_ms)
+        self.timer.timeout.connect(lambda: self._abort(f"Tempo esgotado no download ({timeout_ms // 1000} s)."))
+        self.timer.start()
+        self.reply = nam.get(req)
+        self.reply.redirected.connect(self._redirected)
+        self.reply.readyRead.connect(self._read)
+        self.reply.finished.connect(self._finished)
+
+    def _redirected(self, url: QUrl):
+        if url.scheme() == "https" and security.host_matches(url.host(), security.MEDIA_HOSTS):
+            self.reply.redirectAllowed.emit()
+        else:
+            self._abort("O CDN redirecionou para fora dos hosts de mídia; download cancelado.")
+
+    def _read(self):
+        if self.finished_ or self.reply is None:
+            return
+        status = self.reply.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        if status is not None and int(status) >= 300:
+            return  # corpo de erro: não grava
+        length = self.reply.header(QNetworkRequest.KnownHeaders.ContentLengthHeader)
+        if length is not None and int(length) > self.MAX_BYTES:
+            self._abort("Arquivo grande demais.")
+            return
+        data = bytes(self.reply.readAll())
+        self.written += len(data)
+        if self.written > self.MAX_BYTES:
+            self._abort("Arquivo grande demais.")
+            return
+        try:
+            self.fh.write(data)
+        except OSError as exc:
+            self._abort(f"Erro ao gravar: {exc}")
+
+    def _finished(self):
+        if self.finished_:
+            return
+        self._read()
+        if self.finished_:
+            return
+        try:
+            self.fh.flush()  # a assinatura é lida do disco logo abaixo
+        except OSError as exc:
+            self._end(False, f"Erro ao gravar: {exc}")
+            return
+        r = self.reply
+        status = r.attribute(QNetworkRequest.Attribute.HttpStatusCodeAttribute)
+        status = int(status) if status is not None else 0
+        ctype = str(r.header(QNetworkRequest.KnownHeaders.ContentTypeHeader) or "").lower()
+        if r.error() != QNetworkReply.NetworkError.NoError and status < 300:
+            self._end(False, f"Falha de rede no download: {r.errorString()[:160]}")
+        elif status not in (200, 206):
+            self._end(False, f"O CDN recusou o download (HTTP {status or '?'}).")
+        elif ctype.startswith(("text/", "application/json")):
+            self._end(False, "O CDN respondeu algo que não é mídia; nada foi salvo.")
+        elif not self.written:
+            self._end(False, "O CDN respondeu vazio; nada foi salvo.")
+        elif not media_magic_ok(self.tmp, self.path.suffix):
+            self._end(False, "O arquivo recebido não parece ser a mídia esperada; nada foi salvo.")
+        else:
+            self._end(True, "")
+
+    def _abort(self, msg: str):
+        if self.finished_:
+            return
+        self._end(False, msg)
+        if self.reply is not None:
+            self.reply.abort()
+
+    def _end(self, ok: bool, msg: str):
+        if self.finished_:
+            return
+        self.finished_ = True
+        if getattr(self, "timer", None) is not None:
+            self.timer.stop()
+        try:
+            if self.fh is not None:
+                self.fh.close()
+            if ok:
+                os.replace(self.tmp, self.path)
+            else:
+                self.tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            ok, msg = False, f"Erro ao gravar: {exc}"
+        if self.reply is not None:
+            self.reply.deleteLater()
+        cb, self.done_cb = self.done_cb, None
+        if cb:
+            cb(ok, msg)
+        self.deleteLater()
+
+
+def media_magic_ok(path: Path, ext: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return security.media_magic_ok(fh.read(16), ext)
+    except OSError:
+        return False
+
+
 def _deny_permission(permission):
     permission.deny()
 
@@ -124,6 +263,8 @@ class AccountSession(QObject):
         self._bridge_hits: list[float] = []
         self._pending_downloads: dict[str, dict] = {}
         self._interceptor: Interceptor | None = None
+        self._nam: QNetworkAccessManager | None = None
+        self._media_jar: QNetworkCookieJar | None = None
         # Só o fato "existe cookie de sessão do Instagram"; o valor nunca é lido nem guardado.
         self.logged_in = False
         # Cookies "sessionid" presentes, por (domínio, caminho, valor): a rotação do Instagram
@@ -163,6 +304,7 @@ class AccountSession(QObject):
         p.setUrlRequestInterceptor(self._interceptor)
         p.downloadRequested.connect(self._on_download)
         store = p.cookieStore()
+        self._media_jar = QNetworkCookieJar(self)
         store.cookieAdded.connect(lambda c: self._session_cookie(c, True))
         store.cookieRemoved.connect(lambda c: self._session_cookie(c, False))
         store.loadAllCookies()
@@ -191,6 +333,24 @@ class AccountSession(QObject):
 
     def _session_cookie(self, cookie, added: bool):
         self.logged_in = track_session(self._sessions, bytes(cookie.name()), cookie.domain(), cookie.path(), bytes(cookie.value()), added)
+        # Espelha só cookies dos hosts de mídia (CDN), para o download direto usar o perfil da conta.
+        if self._media_jar is not None and security.host_matches(cookie.domain().lstrip("."), security.MEDIA_HOSTS):
+            if added:
+                self._media_jar.insertCookie(cookie)
+            else:
+                self._media_jar.deleteCookie(cookie)
+
+    def fetch_media(self, url: str, path: Path, done, timeout_ms: int = 90_000) -> bool:
+        """Baixa UMA mídia do CDN (uma requisição) para path; done(ok, mensagem). False se a URL não serve."""
+        if self.profile is None or not security.is_safe_media_url(url):
+            return False
+        if self._nam is None:
+            self._nam = QNetworkAccessManager(self)
+            self._nam.setCookieJar(self._media_jar)
+            self._media_jar.setParent(self)  # o jar continua sendo da sessão
+        MediaFetch(self._nam, url, path, done, user_agent=self.profile.httpUserAgent(), timeout_ms=timeout_ms,
+                   parent=self)
+        return True
 
     @staticmethod
     def _harden(s: QWebEngineSettings):

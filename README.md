@@ -98,7 +98,7 @@ gramdesk-browse download https://www.instagram.com/p/CODIGO/ --index 2 [--out PA
 
 - `grid` só lê o DOM da página aberta (links `/p/` e `/reel/`, tipo, se está visível, fixado, texto alternativo); com `--scroll`, uma rolagem por chamada.
 - `inspect` abre o post (se ainda não estiver aberto) e lê do DOM: tipo (foto, vídeo, reel, carrossel), legenda, data, dimensões e a maior resolução disponível (`srcset` maior; em vídeo, `currentSrc`, que costuma ser um stream `blob:`).
-- `download` usa o mesmo mecanismo do botão de baixar (URL original da CDN) e salva UM arquivo em `~/Downloads/Gramdesk/<conta>/<perfil>/<perfil>_<código>[_NN].ext`, sem arquivos extras. Carrossel exige `--index N` (começa em 1). `--out` copia o arquivo também para outra pasta.
+- `download` pega a URL direta da CDN nos dados que a página já recebeu (em reel/vídeo, o mp4 progressivo de maior resolução de `video_versions`; o stream `blob:` do player não é baixável) e baixa numa única requisição à CDN, com o User-Agent e os cookies de CDN do perfil da conta. Só se esses dados não tiverem a URL ele usa o mecanismo do botão de baixar (no máximo uma consulta à API, dentro da mesma ação). Sem URL baixável: "Vídeo sem URL baixável; tente o botão de baixar na janela do Gramdesk." Tempo máximo do download: 90 s. `inspect` mostra em `best` a maior mídia com URL direta. Salva UM arquivo em `~/Downloads/Gramdesk/<conta>/<perfil>/<perfil>_<código>[_NN].ext`, sem arquivos extras. Carrossel exige `--index N` (começa em 1). `--out` copia o arquivo também para outra pasta.
 - Códigos de saída: 0 ok, 1 erro, 3 app fechado/bloqueado/sem login (nunca abre o app), 4 resfriamento ou bloqueio detectado, 5 cota ou teto, 6 outra ação ou pesquisa em andamento, 7 recusado na janela.
 - Os eventos vão para o mesmo `research.log` (`nav-acao`, `nav-pausa`, `bloqueio`...), sem cookies, tokens nem URLs.
 
@@ -109,7 +109,7 @@ gramdesk-browse download https://www.instagram.com/p/CODIGO/ --index 2 [--out PA
 Baixe `gramdesk-<versão>.flatpak` na página de [Releases](https://github.com/alexonconceicao/gramdesk/releases) e instale:
 
 ```bash
-flatpak install --user gramdesk-0.9.0.flatpak
+flatpak install --user gramdesk-0.9.1.flatpak
 flatpak run io.github.alexonconceicao.Gramdesk
 ```
 

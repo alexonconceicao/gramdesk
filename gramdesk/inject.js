@@ -54,17 +54,50 @@
   const area = (x) => (x && x.width || 0) * (x && x.height || 0);
   const biggest = (list) => list.reduce((a, b) => (area(b) > area(a) ? b : a));
 
+  const httpsUrl = (u) => (typeof u === 'string' && /^https:\/\//.test(u) ? u : '');
+  // Versões progressivas (mp4 com áudio) de um vídeo, maior primeiro. O stream que o player
+  // toca (blob:, MSE/DASH) não serve para download; estas URLs vêm dos dados que a página já recebeu.
+  const versionsOf = (vids) => vids
+    .filter((v) => v && httpsUrl(v.url))
+    .map((v) => ({ url: v.url, w: v.width | 0, h: v.height | 0 }))
+    .sort((a, b) => area({ width: b.w, height: b.h }) - area({ width: a.w, height: a.h }))
+    .slice(0, 6);
+
   const mediaOf = (n) => {
-    const cands = n && n.image_versions2 && n.image_versions2.candidates;
+    if (!n || typeof n !== 'object') return null;
+    const cands = n.image_versions2 && n.image_versions2.candidates;
     const img = Array.isArray(cands) && cands.length ? biggest(cands) : null;
-    const vids = n && n.video_versions;
+    const vids = n.video_versions;
     if (Array.isArray(vids) && vids.length) {
-      const v = biggest(vids);
-      if (v && v.url) return { kind: 'video', url: v.url, thumb: img && img.url || '', w: v.width || 0, h: v.height || 0 };
+      const versions = versionsOf(vids);
+      const v = versions[0];
+      if (v) return { kind: 'video', url: v.url, thumb: img && img.url || '', w: v.w, h: v.h, versions };
+    }
+    // Formato GraphQL (xdt_shortcode_media): video_url / display_resources / display_url.
+    const dims = n.dimensions || {};
+    if (httpsUrl(n.video_url)) {
+      return { kind: 'video', url: n.video_url, thumb: httpsUrl(n.display_url), w: dims.width | 0, h: dims.height | 0,
+        versions: [{ url: n.video_url, w: dims.width | 0, h: dims.height | 0 }] };
+    }
+    const thumb = img && img.url || httpsUrl(n.display_url);
+    // Vídeo sem nenhuma versão baixável nos dados: não vira "imagem" (a capa não é o vídeo).
+    if (n.media_type === 2 || n.is_video === true) {
+      return { kind: 'video', url: '', thumb: thumb || '', w: (img && img.width) || dims.width | 0, h: (img && img.height) || dims.height | 0 };
     }
     if (img && img.url) return { kind: 'image', url: img.url, thumb: img.url, w: img.width || 0, h: img.height || 0 };
+    const res = Array.isArray(n.display_resources) ? n.display_resources.filter((r) => r && httpsUrl(r.src)) : [];
+    if (res.length) {
+      const r = res.reduce((a, b) => ((b.config_width | 0) * (b.config_height | 0) > (a.config_width | 0) * (a.config_height | 0) ? b : a));
+      return { kind: 'image', url: r.src, thumb: r.src, w: r.config_width | 0, h: r.config_height | 0 };
+    }
+    if (httpsUrl(n.display_url)) return { kind: 'image', url: n.display_url, thumb: n.display_url, w: dims.width | 0, h: dims.height | 0 };
     return null;
   };
+
+  // Quanto um registro vale: mídias com URL (vídeo com URL vale mais). Um dado mais pobre
+  // (ex.: miniatura da grade) não substitui o que a página já trouxe do post.
+  const quality = (it) => it.media.reduce((s, m) => s + (m.url ? (m.kind === 'video' ? 4 : 2) : 0) + (m.versions ? 1 : 0), 0);
+  const complete = (it) => !!it && it.media.length > 0 && it.media.every((m) => !!m.url);
 
   const record = (n) => {
     const raw = n.pk != null ? n.pk : (typeof n.id === 'string' ? n.id.split('_')[0] : n.id);
@@ -75,31 +108,40 @@
       user: String(user.username || ''),
       userPk: String(user.pk || user.id || ''),
       media: [],
-      caption: String((n.caption && n.caption.text) || '').slice(0, 6000),
-      takenAt: typeof n.taken_at === 'number' ? n.taken_at : 0,
+      caption: String((n.caption && n.caption.text) ||
+        (n.edge_media_to_caption && n.edge_media_to_caption.edges && n.edge_media_to_caption.edges[0] &&
+          n.edge_media_to_caption.edges[0].node && n.edge_media_to_caption.edges[0].node.text) || '').slice(0, 6000),
+      takenAt: typeof n.taken_at === 'number' ? n.taken_at : (typeof n.taken_at_timestamp === 'number' ? n.taken_at_timestamp : 0),
       reel: n.product_type === 'clips',
     };
+    const sidecar = n.edge_sidecar_to_children && Array.isArray(n.edge_sidecar_to_children.edges)
+      ? n.edge_sidecar_to_children.edges.map((e) => e && e.node).filter(Boolean) : null;
     if (Array.isArray(n.carousel_media) && n.carousel_media.length) {
       for (const c of n.carousel_media) { const m = mediaOf(c); if (m) item.media.push(m); }
+    } else if (sidecar && sidecar.length) {
+      for (const c of sidecar) { const m = mediaOf(c); if (m) item.media.push(m); }
     } else {
       const m = mediaOf(n); if (m) item.media.push(m);
     }
     if (!item.media.length) return;
+    const prev = (item.code && byCode.get(item.code)) || (item.pk && byPk.get(item.pk));
+    if (prev && quality(prev) > quality(item)) return;
     put(byPk, item.pk, item);
     put(byCode, item.code, item);
-    for (const m of item.media) { put(byImg, base(m.thumb), item); put(byImg, base(m.url), item); }
+    for (const m of item.media) { put(byImg, base(m.thumb), item); if (m.url) put(byImg, base(m.url), item); }
   };
 
   const walk = (o, depth) => {
     if (!o || typeof o !== 'object' || depth > 40) return;
     if (Array.isArray(o)) { for (const x of o) walk(x, depth + 1); return; }
-    const isMedia = (o.image_versions2 || o.video_versions || o.carousel_media) && (o.pk != null || o.id != null);
+    const isMedia = ((o.image_versions2 || o.video_versions || o.carousel_media) && (o.pk != null || o.id != null)) ||
+      (typeof o.shortcode === 'string' && (o.video_url || o.display_url || o.display_resources) && o.id != null);
     if (isMedia) record(o);
     if (Array.isArray(o.items) && o.user && o.id != null) {
       put(reels, String(o.id), o.items.map((i) => String(i.pk != null ? i.pk : String(i.id || '').split('_')[0])));
     }
     for (const k in o) {
-      if (isMedia && k === 'carousel_media') continue;
+      if (isMedia && (k === 'carousel_media' || k === 'edge_sidecar_to_children')) continue;
       const v = o[k];
       if (v && typeof v === 'object') walk(v, depth + 1);
     }
@@ -107,7 +149,8 @@
 
   const ingest = (t) => {
     if (typeof t !== 'string' || t.length < 32) return;
-    if (t.indexOf('image_versions2') === -1 && t.indexOf('video_versions') === -1) return;
+    if (t.indexOf('image_versions2') === -1 && t.indexOf('video_versions') === -1 && t.indexOf('video_url') === -1 &&
+        t.indexOf('display_url') === -1) return;
     if (t.startsWith('for (;;);')) t = t.slice(9);
     const parse = (s) => { try { walk(JSON.parse(s), 0); return true; } catch (_) { return false; } };
     if (!parse(t)) for (const line of t.split('\n')) if (line.trim()) parse(line);
@@ -177,7 +220,9 @@
     return n.toString();
   };
 
+  let apiCalls = 0; // requisições extras ao Instagram feitas por aqui (o app registra no log)
   const api = async (path) => {
+    apiCalls += 1;
     const r = await origFetch.call(window, path, {
       credentials: 'include',
       headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest' },
@@ -188,12 +233,14 @@
 
   const byPkOrFetch = async (pk) => {
     if (!/^\d{1,25}$/.test(pk)) return null;
-    if (!byPk.has(pk)) { try { await api('/api/v1/media/' + pk + '/info/'); } catch (_) {} }
+    if (!complete(byPk.get(pk))) { try { await api('/api/v1/media/' + pk + '/info/'); } catch (_) {} }
     return byPk.get(pk) || null;
   };
   const byCodeOrFetch = async (code) => {
     if (!/^[A-Za-z0-9_-]{5,64}$/.test(code)) return null;
-    return byCode.get(code) || byPkOrFetch(codeToPk(code));
+    const hit = byCode.get(code);
+    if (complete(hit)) return hit;
+    return (await byPkOrFetch(hit && hit.pk || codeToPk(code))) || hit || null;
   };
 
   const visibleArea = (el) => {
@@ -283,7 +330,7 @@
       it.media.forEach((m, i) => {
         const id = it.code || it.pk || 'midia';
         const suffix = it.media.length > 1 ? '_' + (i + 1) : '';
-        out.push({ url: m.url, thumb: m.thumb || '', name: (it.user || 'instagram') + '_' + tag + '_' + id + suffix });
+        out.push({ url: m.url, thumb: m.thumb || '', kind: m.kind, w: m.w || 0, h: m.h || 0, name: (it.user || 'instagram') + '_' + tag + '_' + id + suffix });
       });
     }
     return out;
@@ -783,11 +830,33 @@
     }
     dst.querySelectorAll('script, style, noscript, link, path, circle, rect, polygon, polyline, line, g').forEach((n) => n.remove());
   };
+  // Container do post aberto, sem as sugestões ao lado/abaixo ("mais reels", "mais posts de"...).
   const postRoot = () => {
     for (const d of document.querySelectorAll('[role="dialog"]')) {
       if (d.querySelector('article, video, img[srcset]')) return d.querySelector('article') || d;
     }
-    return document.querySelector('main') || document.body;
+    const main = document.querySelector('main') || document.body;
+    const art = main.querySelector('article');
+    if (art && art.querySelector('video, img[srcset]')) return art;
+    // Sem <article>: menor ancestral comum entre a mídia principal (vídeo, ou a maior imagem
+    // visível) e a data/legenda do post. Sugestões não têm data e ficam fora dele.
+    let media = null, best = 0;
+    for (const el of main.querySelectorAll('video')) {
+      const a = visibleArea(el); if (a > best) { media = el; best = a; }
+    }
+    if (!media) {
+      for (const el of main.querySelectorAll('img')) {
+        if (PROFILE_RE.test(el.alt || '') || el.closest('a[href*="/p/"], a[href*="/reel/"]')) continue;
+        const a = visibleArea(el); if (a > best) { media = el; best = a; }
+      }
+    }
+    const anchor = main.querySelector('time') || main.querySelector('h1');
+    if (media && anchor) {
+      for (let n = media.parentElement; n && n !== main && n !== document.body; n = n.parentElement) {
+        if (n.contains(anchor)) return n;
+      }
+    }
+    return main;
   };
   const alertsText = () => {
     const out = [];
@@ -816,9 +885,12 @@
     const it = m && byCode.get(m[1]);  // só o que o site já entregou; nunca busca
     if (!it) return null;
     return {
-      user: it.user, count: it.media.length, caption: it.caption || '', taken_at: it.takenAt || 0,
+      code: it.code, user: it.user, count: it.media.length, caption: it.caption || '', taken_at: it.takenAt || 0,
       type: it.reel ? 'reel' : (it.media.length > 1 ? 'carousel' : (it.media[0] && it.media[0].kind === 'video' ? 'video' : 'image')),
-      media: it.media.map((x) => ({ kind: x.kind, width: x.w || 0, height: x.h || 0 })),
+      media: it.media.map((x) => ({
+        kind: x.kind, width: x.w || 0, height: x.h || 0, url: httpsUrl(x.url), thumb: httpsUrl(x.thumb),
+        versions: (x.versions || []).map((v) => ({ url: v.url, width: v.w, height: v.h })),
+      })),
     };
   };
   const snap = (kind) => {
@@ -843,6 +915,11 @@
     snap(kind) {
       return snap(kind === 'post' ? 'post' : 'grid');
     },
+    media() {
+      // Mídias do post aberto a partir dos dados que a página já recebeu (sem rede).
+      scanInline();
+      return JSON.stringify(cachedIndex());
+    },
     scrollOnce() {
       // Uma rolagem suave de ~80% da tela por chamada; o app espera antes de ler a grade.
       window.scrollBy({ top: Math.round(innerHeight * 0.8), behavior: 'smooth' });
@@ -851,9 +928,10 @@
     start(id, mode, x, y) {
       if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32) return false;
       results.set(id, null);
+      const calls0 = apiCalls;
       run(mode, x, y).then(
-        (files) => results.set(id, { ok: true, files }),
-        (e) => results.set(id, { ok: false, error: String((e && e.message) || e) }),
+        (files) => results.set(id, { ok: true, files, api: apiCalls - calls0 }),
+        (e) => results.set(id, { ok: false, error: String((e && e.message) || e), api: apiCalls - calls0 }),
       );
       return true;
     },
