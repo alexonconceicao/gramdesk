@@ -182,6 +182,8 @@ def test_rotacao_do_cookie_de_sessao_mantem_login():
     assert track_session(s, b"sessionid", ".instagram.com", "/", b"velho", False)
     assert not track_session(s, b"sessionid", ".instagram.com", "/", b"novo", False)
     assert not track_session(set(), b"csrftoken", ".instagram.com", "/", b"x", True)
+    # sessionid pode não chegar ao app (HttpOnly): ds_user_id basta.
+    assert track_session(set(), b"ds_user_id", ".instagram.com", "/", b"123", True)
 
 
 def test_link_externo_do_instagram_abre_fora():

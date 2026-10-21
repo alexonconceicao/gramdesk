@@ -128,7 +128,7 @@ class AccountSession(QObject):
         self.logged_in = False
         # Cookies "sessionid" presentes, por (domínio, caminho, valor): a rotação do Instagram
         # adiciona o novo antes de remover o antigo, então a remoção não pode zerar o login.
-        self._sessions: set[tuple[str, str, bytes]] = set()
+        self._sessions: set[tuple[bytes, str, str, bytes]] = set()
 
     # ---------- ciclo de vida ----------
     @property
