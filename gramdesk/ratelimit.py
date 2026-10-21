@@ -51,6 +51,10 @@ class Limits:
     long_min: float = 20.0
     long_max: float = 45.0
     cache_hours: int = 24  # validade do cache de uma pesquisa
+    # Navegação passo a passo (gramdesk-browse): uma ação por vez, na janela do app.
+    browse_interval: float = 20.0  # intervalo mínimo entre ações de navegação (s)
+    browse_jitter: float = 10.0  # acréscimo aleatório de 0 até este valor (s)
+    browse_daily_posts: int = 15  # aberturas de post por conta e por dia
 
     RANGES = {
         "daily_researches": (1, 10),
@@ -63,6 +67,9 @@ class Limits:
         "long_min": (5.0, 300.0),
         "long_max": (5.0, 600.0),
         "cache_hours": (1, 168),
+        "browse_interval": (10.0, 300.0),
+        "browse_jitter": (0.0, 120.0),
+        "browse_daily_posts": (1, 100),
     }
 
     @classmethod
@@ -214,7 +221,8 @@ def _atomic_write(path: Path, data) -> None:
 # ---------------------------------------------------------------- estado persistente
 def _blank() -> dict:
     return {"level": 0, "cooldown_until": 0.0, "last_block": "", "last_block_at": 0.0,
-            "day": "", "researches": 0, "items": 0, "recent": []}
+            "day": "", "researches": 0, "items": 0, "recent": [],
+            "browse_posts": 0, "browse_actions": 0, "browse_next": 0.0}
 
 
 def _num(v, default=0.0) -> float:
@@ -250,6 +258,9 @@ class RateState:
                 e["items"] = max(0, int(_num(a.get("items"))))
                 rec = a.get("recent") if isinstance(a.get("recent"), list) else []
                 e["recent"] = sorted(_num(t) for t in rec[-400:] if _num(t) > 0)
+                e["browse_posts"] = max(0, int(_num(a.get("browse_posts"))))
+                e["browse_actions"] = max(0, int(_num(a.get("browse_actions"))))
+                e["browse_next"] = _num(a.get("browse_next"))
                 self.data["accounts"][key] = e
 
     def save(self) -> None:
@@ -259,7 +270,7 @@ class RateState:
         e = self.data["accounts"].setdefault(acc, _blank())
         today = day_key(now)
         if e["day"] != today:
-            e.update(day=today, researches=0, items=0)
+            e.update(day=today, researches=0, items=0, browse_posts=0, browse_actions=0)
         e["recent"] = [t for t in e["recent"] if t > now - HOUR]
         return e
 
@@ -337,6 +348,73 @@ class RateState:
             e["level"] = 0
             e["cooldown_until"] = 0.0
         self.save()
+
+
+    # ----- navegação passo a passo
+    def browse_check(self, acc: str, limits: Limits, now: float | None = None, *, post_open: bool = False) -> dict:
+        """Pode fazer UMA ação de navegação agora? Mesmo formato de check() + 'wait' (s até o intervalo mínimo).
+
+        Não olha a cota de pesquisas (são coisas diferentes), mas respeita resfriamento, itens do dia,
+        teto por hora e por minuto e o teto diário de aberturas de post.
+        """
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        base = {"ok": True, "reason": "", "until": 0.0, "message": "", "wait": max(0.0, e["browse_next"] - now)}
+        if e["cooldown_until"] > now:
+            label = BLOCK_LABEL.get(e["last_block"], "O Instagram limitou a conta")
+            return {**base, "ok": False, "reason": "cooldown", "until": e["cooldown_until"],
+                    "message": f"{label}. Resfriamento ativo: aguarde até {hhmm(e['cooldown_until'], now)} "
+                               f"(faltam {human_left(e['cooldown_until'] - now)})."}
+        until = next_midnight(now)
+        if e["items"] >= limits.daily_items:
+            return {**base, "ok": False, "reason": "items", "until": until,
+                    "message": f"Cota diária de itens atingida ({e['items']} de {limits.daily_items}). "
+                               f"Aguarde até {hhmm(until, now)}."}
+        if post_open and e["browse_posts"] >= limits.browse_daily_posts:
+            return {**base, "ok": False, "reason": "posts", "until": until,
+                    "message": f"Teto diário de aberturas de post atingido ({e['browse_posts']} de "
+                               f"{limits.browse_daily_posts}). Aguarde até {hhmm(until, now)}."}
+        if len(e["recent"]) >= limits.per_hour:
+            free = e["recent"][-limits.per_hour] + HOUR
+            return {**base, "ok": False, "reason": "hour", "until": free,
+                    "message": f"Teto de {limits.per_hour} ações por hora atingido. Aguarde até {hhmm(free, now)}."}
+        last_min = [t for t in e["recent"] if t > now - MINUTE]
+        if len(last_min) >= limits.per_minute:
+            base["wait"] = max(base["wait"], last_min[-limits.per_minute] + MINUTE - now + 1)
+        return base
+
+    def record_browse(self, acc: str, limits: Limits, now: float | None = None, *, post_open: bool = False,
+                      navigation: bool = True, rng: random.Random | None = None) -> float:
+        """Conta a ação como 1 requisição e agenda a próxima ação de navegação. Devolve esse horário."""
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        e["items"] += 1
+        e["recent"].append(now)
+        e["browse_actions"] += 1
+        if post_open:
+            e["browse_posts"] += 1
+        if navigation:
+            gap = limits.browse_interval + (rng or random).uniform(0, limits.browse_jitter)
+            e["browse_next"] = max(e["browse_next"], now + gap)
+        self.save()
+        return e["browse_next"]
+
+    def browse_touch(self, acc: str, limits: Limits, now: float | None = None, rng: random.Random | None = None) -> float:
+        """Ao terminar uma ação de navegação: o intervalo mínimo conta a partir do fim dela."""
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        gap = limits.browse_interval + (rng or random).uniform(0, limits.browse_jitter)
+        e["browse_next"] = max(e["browse_next"], now + gap)
+        self.save()
+        return e["browse_next"]
+
+    def browse_status(self, acc: str, limits: Limits, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        chk = self.browse_check(acc, limits, now)
+        return {**chk, "posts_today": e["browse_posts"], "actions_today": e["browse_actions"],
+                "posts_limit": limits.browse_daily_posts, "next_at": e["browse_next"] if e["browse_next"] > now else 0.0,
+                "interval": limits.browse_interval, "jitter": limits.browse_jitter}
 
 
 # ---------------------------------------------------------------- log

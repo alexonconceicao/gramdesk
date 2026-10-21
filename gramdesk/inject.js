@@ -60,9 +60,9 @@
     const vids = n && n.video_versions;
     if (Array.isArray(vids) && vids.length) {
       const v = biggest(vids);
-      if (v && v.url) return { kind: 'video', url: v.url, thumb: img && img.url || '' };
+      if (v && v.url) return { kind: 'video', url: v.url, thumb: img && img.url || '', w: v.width || 0, h: v.height || 0 };
     }
-    if (img && img.url) return { kind: 'image', url: img.url, thumb: img.url };
+    if (img && img.url) return { kind: 'image', url: img.url, thumb: img.url, w: img.width || 0, h: img.height || 0 };
     return null;
   };
 
@@ -75,6 +75,9 @@
       user: String(user.username || ''),
       userPk: String(user.pk || user.id || ''),
       media: [],
+      caption: String((n.caption && n.caption.text) || '').slice(0, 6000),
+      takenAt: typeof n.taken_at === 'number' ? n.taken_at : 0,
+      reel: n.product_type === 'clips',
     };
     if (Array.isArray(n.carousel_media) && n.carousel_media.length) {
       for (const c of n.carousel_media) { const m = mediaOf(c); if (m) item.media.push(m); }
@@ -752,8 +755,99 @@
     }
   };
 
+  // ---------- navegação passo a passo (gramdesk-browse) ----------
+  // Só lê o que a página já mostra: nenhuma requisição sai daqui. O app pede uma ação
+  // por vez e decide o ritmo; o HTML vai anotado (currentSrc, tamanho natural, visível)
+  // e sem scripts, estilos nem desenhos de ícone.
+  const SNAP_MAX = 1500000;
+  const onScreen = (el) => {
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+  };
+  const annotate = (src, dst) => {
+    const sel = 'a, img, video';
+    const a = src.querySelectorAll(sel), b = dst.querySelectorAll(sel);
+    for (let i = 0; i < a.length && i < b.length; i++) {
+      const s = a[i], d = b[i];
+      if (s.tagName === 'IMG') {
+        d.setAttribute('data-gd-current', s.currentSrc || '');
+        d.setAttribute('data-gd-nw', String(s.naturalWidth || 0));
+        d.setAttribute('data-gd-nh', String(s.naturalHeight || 0));
+      } else if (s.tagName === 'VIDEO') {
+        d.setAttribute('data-gd-current', s.currentSrc || '');
+        d.setAttribute('data-gd-nw', String(s.videoWidth || 0));
+        d.setAttribute('data-gd-nh', String(s.videoHeight || 0));
+      }
+      d.setAttribute('data-gd-vis', onScreen(s) ? '1' : '0');
+      d.setAttribute('data-gd-w', String(Math.round(s.getBoundingClientRect().width)));
+    }
+    dst.querySelectorAll('script, style, noscript, link, path, circle, rect, polygon, polyline, line, g').forEach((n) => n.remove());
+  };
+  const postRoot = () => {
+    for (const d of document.querySelectorAll('[role="dialog"]')) {
+      if (d.querySelector('article, video, img[srcset]')) return d.querySelector('article') || d;
+    }
+    return document.querySelector('main') || document.body;
+  };
+  const alertsText = () => {
+    const out = [];
+    for (const d of document.querySelectorAll('[role="dialog"], [role="alertdialog"], [role="alert"]')) {
+      if (d.querySelector('article, video, img[srcset], time')) continue; // post aberto em modal: legenda não conta
+      out.push((d.innerText || '').slice(0, 800));
+    }
+    return out.join('\n').slice(0, 4000);
+  };
+  const signals = () => ({
+    url: location.href.split('#')[0].slice(0, 500),
+    loginForm: !!(document.querySelector('input[name="username"]') && document.querySelector('input[type="password"]')),
+    alerts: alertsText(),
+    title: (document.title || '').slice(0, 200),
+  });
+  const metaTags = () => {
+    const out = {};
+    for (const m of document.querySelectorAll('meta[property^="og:"], meta[name="description"]')) {
+      const k = m.getAttribute('property') || m.getAttribute('name');
+      if (k && !(k in out)) out[k] = String(m.getAttribute('content') || '').slice(0, 7000);
+    }
+    return out;
+  };
+  const cachedIndex = () => {
+    const m = location.pathname.match(/^\/(?:[^/]+\/)?(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/);
+    const it = m && byCode.get(m[1]);  // só o que o site já entregou; nunca busca
+    if (!it) return null;
+    return {
+      user: it.user, count: it.media.length, caption: it.caption || '', taken_at: it.takenAt || 0,
+      type: it.reel ? 'reel' : (it.media.length > 1 ? 'carousel' : (it.media[0] && it.media[0].kind === 'video' ? 'video' : 'image')),
+      media: it.media.map((x) => ({ kind: x.kind, width: x.w || 0, height: x.h || 0 })),
+    };
+  };
+  const snap = (kind) => {
+    scanInline();
+    const root = kind === 'post' ? postRoot() : (document.querySelector('main') || document.body);
+    let html = '';
+    let ready = false;
+    if (root) {
+      const clone = root.cloneNode(true);
+      annotate(root, clone);
+      html = clone.outerHTML.slice(0, SNAP_MAX);
+      ready = kind === 'post'
+        ? !!root.querySelector('video, img[srcset], time')
+        : !!root.querySelector('a[href*="/p/"], a[href*="/reel/"]');
+    }
+    return JSON.stringify({ url: location.href.split('#')[0], ready, signals: signals(), meta: metaTags(),
+      index: kind === 'post' ? cachedIndex() : null, html });
+  };
+
   const results = new Map();
   const bridge = Object.freeze({
+    snap(kind) {
+      return snap(kind === 'post' ? 'post' : 'grid');
+    },
+    scrollOnce() {
+      // Uma rolagem suave de ~80% da tela por chamada; o app espera antes de ler a grade.
+      window.scrollBy({ top: Math.round(innerHeight * 0.8), behavior: 'smooth' });
+      return true;
+    },
     start(id, mode, x, y) {
       if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32) return false;
       results.set(id, null);

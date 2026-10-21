@@ -83,12 +83,21 @@ def scan(root: Path) -> list[Entry]:
         root_real = root.resolve(strict=True)
     except OSError:
         return out
-    dirs = [root]
-    try:
-        dirs += [d for d in root.iterdir() if d.is_dir() and not d.is_symlink() and not d.name.startswith(".")]
-    except OSError:
+    def subdirs(d: Path) -> list[Path]:
+        try:
+            return [x for x in d.iterdir() if x.is_dir() and not x.is_symlink() and not x.name.startswith(".")]
+        except OSError:
+            return []
+
+    if not root.is_dir():
         return out
-    for d in dirs:
+    # root/<conta>/ e root/<conta>/<perfil>/ (navegação passo a passo); "Pesquisas" tem galeria própria.
+    pairs: list[tuple[Path, str]] = [(root, "")]
+    for d in subdirs(root):
+        pairs.append((d, d.name))
+        if d.name != "Pesquisas":
+            pairs += [(sub, d.name) for sub in subdirs(d)]
+    for d, folder in pairs:
         try:
             files = list(d.iterdir())
         except OSError:
@@ -102,7 +111,7 @@ def scan(root: Path) -> list[Entry]:
                 st = f.stat()
             except OSError:
                 continue
-            out.append(Entry(f, "" if d == root else d.name, st.st_mtime, st.st_size))
+            out.append(Entry(f, folder, st.st_mtime, st.st_size))
     out.sort(key=lambda e: e.mtime, reverse=True)
     return out
 

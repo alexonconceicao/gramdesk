@@ -381,6 +381,56 @@ class AccountSession(QObject):
     def blocked_count(self) -> int:
         return self._interceptor.blocked if self._interceptor else 0
 
+    # ---------- navegação passo a passo (gramdesk-browse) ----------
+    _BRIDGE_CALLS = ("snap", "scrollOnce")
+
+    def bridge_call(self, method: str, args: list, cb):
+        """Chama uma função do script injetado na página principal; cb recebe o retorno (ou None)."""
+        if self.page is None or method not in self._BRIDGE_CALLS:
+            cb(None)
+            return
+        key = json.dumps(self._key)
+        self.page.runJavaScript(
+            f"(window[{key}]||null)&&window[{key}].{method}(...{json.dumps(args)})",
+            QWebEngineScript.ScriptWorldId.MainWorld,
+            cb,
+        )
+
+    def current_files(self, cb, timeout_s: float = 20.0):
+        """Arquivos (maior resolução) do post aberto, pelo mesmo mecanismo do botão de download."""
+        if self.page is None:
+            cb({"ok": False, "error": "sem página"})
+            return
+        req = security.new_request_id()
+        key = json.dumps(self._key)
+        tries = int(timeout_s / 0.25)
+
+        def poll(n: int):
+            if self.page is None:
+                cb({"ok": False, "error": "página fechada"})
+                return
+            if n > tries:
+                cb({"ok": False, "error": "tempo esgotado ao localizar a mídia"})
+                return
+
+            def got(raw):
+                if raw is None:
+                    QTimer.singleShot(250, lambda: poll(n + 1))
+                    return
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) and len(raw) < 2_000_000 else {}
+                except ValueError:
+                    data = {}
+                cb(data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida"})
+
+            self.page.runJavaScript(f"window[{key}].take({json.dumps(req)})", QWebEngineScript.ScriptWorldId.MainWorld, got)
+
+        self.page.runJavaScript(
+            f"(window[{key}]||null)&&window[{key}].start(...{json.dumps([req, 'current', None, None])})",
+            QWebEngineScript.ScriptWorldId.MainWorld,
+            lambda ok: poll(0) if ok else cb({"ok": False, "error": "página ainda carregando"}),
+        )
+
     # ---------- download ----------
     def collect(self, mode: str, x: float | None = None, y: float | None = None):
         if self.page is None or mode not in ("current", "stories"):

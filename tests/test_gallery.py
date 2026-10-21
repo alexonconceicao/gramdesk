@@ -50,3 +50,14 @@ def test_research_cli_args():
     assert r["username"] == "nasa" and r["rid"] == "ab" * 8
     assert r["opts"] == {"posts": 30, "comments": False, "highlights": True, "videos": True}
     assert app._research_args(["https://www.instagram.com/x/"]) is None
+
+
+def test_scan_includes_profile_subfolders_from_browse(tmp_path):
+    root = tmp_path / "Gramdesk"
+    sub = root / "Pessoal" / "profa.ana"
+    sub.mkdir(parents=True)
+    (sub / "profa.ana_AAA111aaa.jpg").write_bytes(b"x")
+    (root / "Pesquisas" / "perfil-1" / "media").mkdir(parents=True)
+    (root / "Pesquisas" / "perfil-1" / "x.jpg").write_bytes(b"x")
+    entries = gallery.scan(root)
+    assert [(e.path.name, e.folder) for e in entries] == [("profa.ana_AAA111aaa.jpg", "Pessoal")]

@@ -33,6 +33,7 @@ from .gallery import GalleryPage
 from .prefs import PreferencesPage
 from . import donation, ratelimit, research, research_cache
 from .research_ui import ResearchPage
+from .browse_qt import BrowseController
 
 
 def _app_icon() -> QIcon:
@@ -280,6 +281,7 @@ class MainWindow(QMainWindow):
         self.research_job = None
         self.rate = ratelimit.RateState(config.RATE_FILE)
         self.rlog = ratelimit.ResearchLog(config.RESEARCH_LOG)
+        self.browse = BrowseController(self)
         self.research_page = ResearchPage(self)
         self.stack.addWidget(self.research_page)
         self._before_prefs = None
@@ -1047,6 +1049,7 @@ class MainWindow(QMainWindow):
                 "logged_in": bool(sess is not None and sess.profile is not None and sess.logged_in),
                 "current": self.current is not None and self.current.account.id == a.id,
                 "rate": self.rate.status(a.id, lim),
+                "browse": self.browse.account_status(a.id),
             })
         job = self.research_job
         return {
@@ -1054,6 +1057,7 @@ class MainWindow(QMainWindow):
             "app": config.VERSION,
             "locked": False,
             "research_running": job is not None and job.state not in research.STATES_FINAL,
+            "browse": {"proto": 1, "busy": self.browse.busy},
             "accounts": accounts,
             "limits": lim.to_dict(),
         }
@@ -1373,7 +1377,7 @@ def _research_args(args: list[str]) -> dict | None:
 
 
 def _listen(win: "MainWindow"):
-    from PyQt6.QtNetwork import QLocalServer
+    from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
     server = QLocalServer(win)
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)
@@ -1385,6 +1389,7 @@ def _listen(win: "MainWindow"):
         conn = server.nextPendingConnection()
         if conn is None:
             return
+        conn.disconnected.connect(conn.deleteLater)
 
         def read():
             data = bytes(conn.readAll()).decode("utf-8", "replace").strip()[:4096]
@@ -1397,6 +1402,28 @@ def _listen(win: "MainWindow"):
                 conn.write(reply.encode("utf-8") + b"\n")
                 conn.flush()
                 conn.disconnectFromServer()
+                return
+            if data.startswith("B "):
+                # Navegação passo a passo: a conexão fica aberta até a ação terminar.
+                try:
+                    req = json.loads(data[2:])
+                except ValueError:
+                    req = None
+
+                def reply(obj, conn=conn):
+                    try:
+                        if conn.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                            conn.write(json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n")
+                            conn.flush()
+                            conn.disconnectFromServer()
+                    except RuntimeError:  # socket já destruído (CLI encerrada)
+                        pass
+
+                if not isinstance(req, dict):
+                    reply({"proto": 1, "ok": False, "code": 1, "message": "Pedido inválido."})
+                    return
+                conn.readyRead.disconnect()
+                QTimer.singleShot(0, lambda: win.browse.handle(req, reply))
                 return
             conn.disconnectFromServer()
             if data.startswith("R "):

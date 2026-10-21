@@ -438,8 +438,28 @@ class PreferencesPage(QWidget):
                                    f"a cada {lim.long_every} itens.", pace))
         b.addWidget(ui.setting_row("Cache", f"Pesquisas do mesmo perfil feitas nas últimas {lim.cache_hours} h são reaproveitadas; "
                                    "só o que falta é buscado.", QWidget()))
+        b.addWidget(_section_title("Navegação passo a passo"))
+        b.addWidget(_label(
+            "Usada pelo comando gramdesk-browse: abre perfis e posts nesta janela, um por vez, e baixa só a mídia "
+            "escolhida. Cada ação conta como 1 item do dia; a primeira de cada sessão pede sua aprovação.",
+            "muted", True,
+        ))
+        b.addWidget(ui.setting_row("Posts abertos por dia", "Teto de aberturas de post por conta (inspecionar ou baixar).",
+                                   seg("browse_daily_posts", [(10, "10"), (15, "15"), (25, "25"), (40, "40")],
+                                       lim.browse_daily_posts)))
+        b.addWidget(ui.setting_row("Intervalo entre ações",
+                                   f"Agora: {lim.browse_interval:g} s mais 0 a {lim.browse_jitter:g} s aleatórios, "
+                                   "contados a partir do fim da ação anterior.",
+                                   seg("browse_interval", [("20.0", "20 s"), ("40.0", "40 s"), ("60.0", "60 s")],
+                                       f"{lim.browse_interval:.1f}")))
         cur = win.current
         if cur is not None:
+            bst = win.rate.browse_status(cur.account.id, lim)
+            b.addWidget(ui.setting_row(
+                f"Navegação de {cur.account.name}",
+                bst["message"] or f"Hoje: {bst['posts_today']} de {bst['posts_limit']} posts abertos, "
+                                  f"{bst['actions_today']} ações.",
+                QWidget()))
             st = win.rate.status(cur.account.id, lim)
             txt = st["message"] or (f"Liberada. Hoje: {st['researches_today']} pesquisas, {st['items_today']} itens.")
             b.addWidget(ui.setting_row(f"Situação de {cur.account.name}", txt, QWidget()))

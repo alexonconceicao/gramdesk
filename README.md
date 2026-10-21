@@ -74,6 +74,34 @@ Segurança:
 - A linha de comando nunca abre o app nem inicia coleta sem a janela aberta e a conta logada.
 - A análise usa o Claude Code em `--restricted` (sem terminal, sem rede, arquivos só da pasta). Legendas e comentários são tratados como conteúdo não confiável.
 
+## Navegação passo a passo (gramdesk-browse)
+
+Para coletar aos poucos, como uma pessoa, sem as leituras em lote da pesquisa: o app abre o perfil na própria janela, você lê a grade, abre UM post, confere o conteúdo e baixa só aquele arquivo. Cada chamada faz uma ação e sai; não existe laço automático.
+
+```bash
+ln -s "$PWD/tools/gramdesk_browse.py" ~/.local/bin/gramdesk-browse
+gramdesk-browse status                                   # app aberto, conta logada, cota, próxima ação
+gramdesk-browse open @perfil                             # abre o perfil na janela
+gramdesk-browse grid                                     # JSON com os posts já visíveis na grade
+gramdesk-browse grid --scroll                            # rola uma vez, devagar, e lista de novo
+gramdesk-browse inspect https://www.instagram.com/p/CODIGO/   # tipo, legenda, data, dimensões, mídia
+gramdesk-browse download https://www.instagram.com/p/CODIGO/ --index 2 [--out PASTA]
+```
+
+| Regra | Padrão |
+|---|---|
+| Intervalo entre ações de navegação (abrir, inspecionar, baixar, rolar) | 20 s + 0 a 10 s aleatórios, contados do fim da ação anterior; se chamar antes, o app espera o restante e avisa |
+| Aberturas de post por conta e por dia | 15 (Preferências > Pesquisa de perfil > Navegação passo a passo) |
+| Cada ação | conta como 1 item da cota diária (200) e do teto por hora (60) da pesquisa |
+| Primeira ação de cada sessão do app | pede aprovação na janela |
+| Sinal de bloqueio na página (checkpoint, "Tente novamente mais tarde", tela de login) | para na hora, sem novas tentativas, e ativa o resfriamento da conta |
+
+- `grid` só lê o DOM da página aberta (links `/p/` e `/reel/`, tipo, se está visível, fixado, texto alternativo); com `--scroll`, uma rolagem por chamada.
+- `inspect` abre o post (se ainda não estiver aberto) e lê do DOM: tipo (foto, vídeo, reel, carrossel), legenda, data, dimensões e a maior resolução disponível (`srcset` maior; em vídeo, `currentSrc`, que costuma ser um stream `blob:`).
+- `download` usa o mesmo mecanismo do botão de baixar (URL original da CDN) e salva UM arquivo em `~/Downloads/Gramdesk/<conta>/<perfil>/<perfil>_<código>[_NN].ext`, sem arquivos extras. Carrossel exige `--index N` (começa em 1). `--out` copia o arquivo também para outra pasta.
+- Códigos de saída: 0 ok, 1 erro, 3 app fechado/bloqueado/sem login (nunca abre o app), 4 resfriamento ou bloqueio detectado, 5 cota ou teto, 6 outra ação ou pesquisa em andamento, 7 recusado na janela.
+- Os eventos vão para o mesmo `research.log` (`nav-acao`, `nav-pausa`, `bloqueio`...), sem cookies, tokens nem URLs.
+
 ## Instalação
 
 ### Flatpak (recomendado)
@@ -81,7 +109,7 @@ Segurança:
 Baixe `gramdesk-<versão>.flatpak` na página de [Releases](https://github.com/alexonconceicao/gramdesk/releases) e instale:
 
 ```bash
-flatpak install --user gramdesk-0.8.0.flatpak
+flatpak install --user gramdesk-0.9.0.flatpak
 flatpak run io.github.alexonconceicao.Gramdesk
 ```
 
