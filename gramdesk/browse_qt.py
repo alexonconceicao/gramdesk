@@ -294,9 +294,10 @@ class _Ctx:
         self.s.bridge_call("scrollOnce", [], scrolled)
 
     def after_grid(self, data: dict, here: dict):
-        items = browse.parse_grid(str(data.get("html") or ""), here["user"])
+        html = str(data.get("html") or "")
+        items = browse.parse_grid(html, here["user"])
         self.finish(OK, f"{len(items)} post(s) na grade.", {
-            "profile": here["user"], "url": here["url"], "scrolled": self.scroll,
+            "profile": here["user"], "url": here["url"], "scrolled": self.scroll, "avatar": browse.parse_avatar(html),
             "count": len(items), "visible": sum(1 for i in items if i["visible"]), "items": items,
         })
 

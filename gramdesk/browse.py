@@ -274,6 +274,14 @@ def _labels(node: Node) -> list[str]:
     return out
 
 
+def parse_avatar(html: str) -> str:
+    """URL da foto de perfil (maior resolução) no cabeçalho do perfil aberto; "" se não houver."""
+    for img in parse_html(html).find_all("img"):
+        if _PROFILE_ALT.search(img.get("alt")) and any(a.tag == "header" for a in img.ancestors()):
+            return media_of(img)["url"]
+    return ""
+
+
 def parse_grid(html: str, owner: str = "") -> list[dict]:
     """Links de posts/reels da grade do perfil, na ordem da página, sem repetir.
 

@@ -84,6 +84,11 @@ def test_parse_grid_lists_posts_in_order_without_duplicates():
     assert by["DDD444ddd"]["kind"] == "reel"
 
 
+def test_parse_avatar_reads_profile_picture_from_header():
+    assert browse.parse_avatar(GRID_HTML) == "https://x.cdninstagram.com/pp.jpg"
+    assert browse.parse_avatar("<main><img alt='Turma' src='https://s.cdninstagram.com/b.jpg'></main>") == ""
+
+
 def test_parse_grid_without_owner_keeps_other_profiles():
     assert "EEE555eee" in [i["code"] for i in browse.parse_grid(GRID_HTML)]
 
