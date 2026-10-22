@@ -103,6 +103,7 @@ _ICONS = {
     "ghost": '<path d="M12 3a7 7 0 0 0-7 7v11l2.33-1.75L9.67 21 12 19.25 14.33 21l2.34-1.75L19 21V10a7 7 0 0 0-7-7z"/>'
     '<path d="M9.5 10.5h.01M14.5 10.5h.01" stroke-width="2.6"/>',
     "download": '<path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/>',
+    "queue": '<path d="M4 6h10M4 11h10M4 16h6"/><path d="M18 9v10M14.5 15.5l3.5 3.5 3.5-3.5"/>',
     "stories": '<path d="M12 3a9 9 0 0 1 0 18" /><path d="M12 21a9 9 0 0 1-9-9" stroke-dasharray="2.5 3"/>'
     '<path d="M3 12a9 9 0 0 1 9-9" stroke-dasharray="2.5 3"/><path d="M12 8v7M9 12.5l3 3 3-3"/>',
     "lock": '<rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',

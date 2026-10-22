@@ -34,6 +34,7 @@ from .prefs import PreferencesPage
 from . import donation, ratelimit, research, research_cache
 from .research_ui import ResearchPage
 from .browse_qt import BrowseController
+from .queue_qt import ProfileQueueRunner
 
 
 def _app_icon() -> QIcon:
@@ -282,6 +283,8 @@ class MainWindow(QMainWindow):
         self.rate = ratelimit.RateState(config.RATE_FILE)
         self.rlog = ratelimit.ResearchLog(config.RESEARCH_LOG)
         self.browse = BrowseController(self)
+        self.queue = ProfileQueueRunner(self)
+        rv.addWidget(self.queue.bar)
         self.research_page = ResearchPage(self)
         self.stack.addWidget(self.research_page)
         self._before_prefs = None
@@ -366,6 +369,9 @@ class MainWindow(QMainWindow):
         h.addWidget(dl)
         h.addSpacing(4)
         h.addWidget(ui.icon_button("stories", "Baixar todos os stories do perfil (Ctrl+Shift+D)", lambda: self._collect("stories")))
+        queue_btn = ui.icon_button("queue", "Baixar todas as mídias do perfil, uma por vez")
+        queue_btn.clicked.connect(lambda: self.queue.menu(queue_btn))
+        h.addWidget(queue_btn)
         h.addWidget(ui.icon_button("gallery", "Meus downloads (Ctrl+J)", lambda: self.open_gallery(self._current_folder())))
         h.addWidget(ui.icon_button("search", "Pesquisar perfil (Ctrl+Shift+F)", lambda: self.open_research(self._profile_in_view())))
         acc_btn = ui.icon_button("user", "Configurações da conta (Ctrl+Shift+,)", self._current_account_prefs)
