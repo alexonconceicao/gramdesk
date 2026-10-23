@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QPushButton,
     QScrollArea,
+    QSystemTrayIcon,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -196,6 +197,15 @@ class PreferencesPage(QWidget):
             grid.addLayout(cell)
         grid.addStretch()
         b.addWidget(panel)
+
+        b.addSpacing(10)
+        b.addWidget(_section_title("Janela"))
+        tray = ui.Toggle(cfg.tray)
+        tray.toggled.connect(lambda v: self.win.set_option("tray", v))
+        desc = "Fechar a janela deixa o Gramdesk rodando na bandeja (área de notificação). Para sair de vez, use \"Sair\" no ícone."
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            desc += " Bandeja não encontrada neste sistema: no GNOME, ative a extensão AppIndicator."
+        b.addWidget(ui.setting_row("Manter na bandeja ao fechar", desc, tray))
 
     def _accounts(self):
         win, cfg = self.win, self.win.cfg

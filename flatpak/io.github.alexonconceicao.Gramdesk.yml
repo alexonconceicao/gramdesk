@@ -7,6 +7,8 @@ base-version: "6.11"
 command: gramdesk
 finish-args:
   - --share=ipc
+  # Ícone na bandeja (StatusNotifierItem): GNOME com AppIndicator e KDE.
+  - --talk-name=org.kde.StatusNotifierWatcher
   - --share=network
   - --socket=wayland
   - --socket=fallback-x11

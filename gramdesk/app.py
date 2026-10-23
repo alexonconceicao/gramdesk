@@ -20,10 +20,12 @@ from PyQt6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMenu,
     QPushButton,
     QScrollArea,
     QSizePolicy,
     QStackedWidget,
+    QSystemTrayIcon,
     QVBoxLayout,
     QWidget,
 )
@@ -178,6 +180,10 @@ class MainWindow(QMainWindow):
         self.lock_screen = LockScreen(self._unlock)
         self.outer.addWidget(self.lock_screen)
         self.toast = ui.Toast(self.outer)
+        self.tray: QSystemTrayIcon | None = None
+        self._quitting = False
+        self._tray_hint_shown = False
+        self._sync_tray()
 
         for acc in cfg.accounts:
             self._add_button(acc)
@@ -955,6 +961,42 @@ class MainWindow(QMainWindow):
         elif res == "go":
             QDesktopServices.openUrl(QUrl(c["url"]))
 
+    # ---------- bandeja ----------
+    def tray_active(self) -> bool:
+        return self.tray is not None and self.tray.isVisible()
+
+    def _sync_tray(self):
+        """Cria ou remove o ícone na bandeja conforme a preferência (e se o sistema tiver bandeja)."""
+        want = self.cfg.tray and QSystemTrayIcon.isSystemTrayAvailable()
+        if want and self.tray is None:
+            self.tray = QSystemTrayIcon(_app_icon(), self)
+            self.tray.setToolTip("Gramdesk")
+            menu = QMenu(self)
+            menu.addAction("Abrir Gramdesk", self.raise_window)
+            menu.addSeparator()
+            menu.addAction("Sair", self.quit_app)
+            self.tray.setContextMenu(menu)
+            self.tray.activated.connect(self._tray_activated)
+            self.tray.show()
+        elif not want and self.tray is not None:
+            self.tray.hide()
+            self.tray.deleteLater()
+            self.tray = None
+        # Com bandeja, fechar a janela não encerra o app (quem encerra é "Sair").
+        QApplication.instance().setQuitOnLastWindowClosed(not self.tray_active())
+
+    def _tray_activated(self, reason):
+        if reason in (QSystemTrayIcon.ActivationReason.Trigger, QSystemTrayIcon.ActivationReason.DoubleClick):
+            if self.isVisible() and not self.isMinimized() and self.isActiveWindow():
+                self.hide()
+            else:
+                self.raise_window()
+
+    def quit_app(self):
+        self._quitting = True
+        self.close()
+        QApplication.instance().quit()
+
     def raise_window(self):
         if self.isMinimized():
             self.showNormal()
@@ -1142,6 +1184,9 @@ class MainWindow(QMainWindow):
         elif key == "research_limits" and isinstance(value, dict):
             merged = dict(self.cfg.research_limits, **value)
             self.cfg.research_limits = ratelimit.Limits.from_dict(merged).to_dict()
+        elif key == "tray":
+            self.cfg.tray = bool(value)
+            self._sync_tray()
         elif key == "idle_lock" and value in config.IDLE_LOCK:
             self.cfg.idle_lock = value
             self._arm_idle()
@@ -1293,6 +1338,14 @@ class MainWindow(QMainWindow):
         return True
 
     def closeEvent(self, e):  # noqa: N802
+        if self.tray_active() and not self._quitting:
+            e.ignore()
+            self.hide()
+            config.save(self.cfg)
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray.showMessage("Gramdesk continua aberto", "Está na bandeja. Use \"Sair\" no ícone para fechar de vez.", _app_icon(), 4000)
+            return
         if self.research_job is not None and self.research_job.state not in research.STATES_FINAL:
             self.research_job.cancel()
         config.save(self.cfg)

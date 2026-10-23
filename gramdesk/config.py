@@ -13,7 +13,7 @@ from . import ratelimit, security
 
 APP_NAME = "gramdesk"
 APP_ID = "io.github.alexonconceicao.Gramdesk"
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 
 
 IS_WINDOWS = os.name == "nt"
@@ -117,6 +117,8 @@ class Config:
     site_follows_theme: bool = True
     idle_lock: int = 0
     feed_buttons: bool = True
+    # Fechar a janela manda o app para a bandeja (área de notificação) em vez de sair.
+    tray: bool = True
     donation: dict = field(default_factory=dict)
     lock: dict | None = None
     pending_delete: list[str] = field(default_factory=list)
@@ -159,6 +161,7 @@ def _parse(raw: dict) -> Config:
         cfg.accent = raw["accent"]
     cfg.site_follows_theme = bool(raw.get("site_follows_theme", True))
     cfg.feed_buttons = bool(raw.get("feed_buttons", True))
+    cfg.tray = bool(raw.get("tray", True))
     don = raw.get("donation") if isinstance(raw.get("donation"), dict) else {}
     cfg.donation = {
         k: v for k, v in {
@@ -217,6 +220,7 @@ def save(cfg: Config) -> None:
         "site_follows_theme": cfg.site_follows_theme,
         "idle_lock": cfg.idle_lock,
         "feed_buttons": cfg.feed_buttons,
+        "tray": cfg.tray,
         "donation": cfg.donation,
         "lock": cfg.lock,
         "pending_delete": cfg.pending_delete,

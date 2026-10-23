@@ -78,3 +78,14 @@ def test_appearance_and_account_fields(cfgmod):
     assert c.theme == "system" and c.accent == "oceano" and c.idle_lock == 0
     cfgmod.save(c)
     assert cfgmod.load().accent == "oceano"
+
+
+def test_tray_defaults_on_and_roundtrips(cfgmod):
+    assert cfgmod.Config().tray is True
+    cfgmod.private_dir(cfgmod.CONFIG_DIR)
+    cfgmod.CONFIG_FILE.write_text(json.dumps({"accounts": []}))
+    assert cfgmod.load().tray is True
+    c = cfgmod.load()
+    c.tray = False
+    cfgmod.save(c)
+    assert cfgmod.load().tray is False
