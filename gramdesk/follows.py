@@ -28,7 +28,10 @@ AUDIT_MAX_BYTES = 2 * 1024 * 1024
 AUDIT_EVENTS = (
     "checagem", "checagem-parcial", "deixou-de-seguir", "voltou-a-seguir", "deixei-de-seguir",
     "lote-inicio", "lote-pausa", "lote-fim", "contagem", "bloqueio", "manter", "desmarcar-manter", "desacelerar",
+    "removi-seguidor", "importacao-meta",
 )
+HISTORY_MAX = 2000
+ACTIONS = ("unfollow", "remove")
 
 
 def _atomic_write(path: Path, data) -> None:
@@ -75,7 +78,8 @@ def user_entry(raw) -> tuple[str, dict] | None:
     if not PK_RE.match(pk) or not isinstance(username, str) or not USERNAME_RE.match(username):
         return None
     return pk, {"u": username, "n": _text(raw.get("full_name"), 120), "v": bool(raw.get("is_verified")),
-                "p": bool(raw.get("is_private"))}
+                "p": bool(raw.get("is_private")),
+                "a": bool(raw.get("anon_pic") or raw.get("has_anonymous_profile_picture"))}
 
 
 def _users(raw) -> dict:
@@ -83,7 +87,8 @@ def _users(raw) -> dict:
     if isinstance(raw, dict):
         for pk, e in list(raw.items())[:MAX_USERS]:
             if PK_RE.match(str(pk)) and isinstance(e, dict) and USERNAME_RE.match(str(e.get("u", ""))):
-                out[str(pk)] = {"u": e["u"], "n": _text(e.get("n"), 120), "v": bool(e.get("v")), "p": bool(e.get("p"))}
+                out[str(pk)] = {"u": e["u"], "n": _text(e.get("n"), 120), "v": bool(e.get("v")), "p": bool(e.get("p")),
+                                "a": bool(e.get("a"))}
     return out
 
 
@@ -94,6 +99,148 @@ def diff(prev: dict, new: dict) -> tuple[list[str], list[str]]:
 
 def is_famous(count: int | None, threshold: int) -> bool | None:
     return None if count is None else count >= threshold
+
+
+def famous(u: dict, threshold: int, verified: bool = True) -> bool:
+    """Famoso pela própria lista (selo de verificado) ou pela contagem de seguidores, se já buscada."""
+    if verified and u.get("v"):
+        return True
+    return bool(is_famous(u.get("count"), threshold))
+
+
+_KEYBOARD = ("qwertyuiop", "asdfghjkl", "zxcvbnm")
+GHOST_LEVELS = ((65, "bot"), (45, "inativo"), (25, "suspeito"))
+
+
+def ghost_score(u: dict) -> tuple[int, str, list[str]]:
+    """Pontuação 0-100 de conta fantasma/bot, só com o que veio na lista (sem requisição a mais)."""
+    name = u.get("u", "").lower()
+    full = (u.get("n") or "").strip()
+    score, why = 0, []
+    if u.get("a"):
+        score += 15
+        why.append("sem foto de perfil")
+    if re.search(r"\d{6,}", name):
+        score += 20
+        why.append("sequência longa de números")
+    if re.fullmatch(r"[a-z]{2,6}\d{4,}", name):
+        score += 25
+        why.append("padrão letras + números")
+    if any(row[i:i + 4] in name for row in _KEYBOARD for i in range(len(row) - 3)):
+        score += 25
+        why.append("letras seguidas do teclado")
+    if not full:
+        score += 10
+        why.append("sem nome")
+    elif full.lower() == name:
+        score += 10
+        why.append("nome igual ao @")
+    if u.get("v"):
+        score, why = 0, []
+    score = min(100, score)
+    level = next((lv for lim, lv in GHOST_LEVELS if score >= lim), "")
+    return score, level, why
+
+
+# ---------------------------------------------------------------- exportação oficial da Meta
+_META_LINK = re.compile(r"instagram\.com/(?:_u/)?([A-Za-z0-9._]{1,30})/?(?=[\"'?#<\s])")
+_META_RESERVED = {"about", "accounts", "direct", "emails", "explore", "legal", "p", "privacy", "reel", "reels",
+                  "stories", "www", "developer", "web"}
+META_FILES = {
+    "followers": ("followers_",),
+    "following": ("following.",),
+    "pending": ("pending_follow_requests",),
+    "unfollowed": ("recently_unfollowed",),
+}
+
+
+def _meta_users_html(text: str) -> list[str]:
+    return [m.group(1).lower() for m in _META_LINK.finditer(text) if m.group(1).lower() not in _META_RESERVED]
+
+
+def _meta_users_json(data) -> list[str]:
+    out = []
+
+    def walk(o, depth=0):
+        if depth > 12:
+            return
+        if isinstance(o, dict):
+            for k in ("value", "title"):
+                v = o.get(k)
+                if isinstance(v, str) and USERNAME_RE.match(v.strip().lstrip("@")):
+                    out.append(v.strip().lstrip("@").lower())
+                    return
+            href = o.get("href")
+            if isinstance(href, str):
+                out.extend(_meta_users_html(href + "/ "))
+                return
+            for v in o.values():
+                walk(v, depth + 1)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v, depth + 1)
+
+    walk(data)
+    return out
+
+
+def parse_meta_files(files: dict[str, str]) -> dict[str, list[str]]:
+    """{nome do arquivo: conteúdo} da exportação da Meta (HTML ou JSON) -> listas de @ por categoria."""
+    lists: dict[str, list[str]] = {k: [] for k in META_FILES}
+    for name, text in files.items():
+        base = name.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        kind = next((k for k, prefixes in META_FILES.items() if any(base.startswith(p) for p in prefixes)), None)
+        if kind is None or not base.endswith((".html", ".json")):
+            continue
+        if base.endswith(".json"):
+            try:
+                users = _meta_users_json(json.loads(text))
+            except ValueError:
+                users = []
+        else:
+            users = _meta_users_html(text)
+        lists[kind].extend(users)
+    return {k: sorted(set(v)) for k, v in lists.items()}
+
+
+def read_meta_export(path: Path) -> dict[str, list[str]]:
+    """Pasta ou .zip da exportação "Baixar suas informações" do Instagram. Só lê; nada vai para a rede."""
+    import zipfile
+
+    path = Path(path)
+    wanted = tuple(p for prefixes in META_FILES.values() for p in prefixes)
+    files: dict[str, str] = {}
+    if path.is_file() and zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist()[:20000]:
+                base = info.filename.rsplit("/", 1)[-1].lower()
+                if base.startswith(wanted) and info.file_size < 50_000_000:
+                    files[info.filename] = z.read(info).decode("utf-8", "replace")
+    elif path.is_dir():
+        for f in list(path.rglob("*"))[:50000]:
+            if f.is_file() and not f.is_symlink() and f.name.lower().startswith(wanted) and f.stat().st_size < 50_000_000:
+                files[str(f)] = f.read_text(encoding="utf-8", errors="replace")
+    else:
+        raise ValueError("escolha a pasta ou o .zip da exportação")
+    out = parse_meta_files(files)
+    if not out["followers"] and not out["following"]:
+        raise ValueError("não achei followers_1 nem following na exportação")
+    return out
+
+
+def meta_analysis(lists: dict[str, list[str]]) -> dict[str, list[str]]:
+    followers, following = set(lists.get("followers", [])), set(lists.get("following", []))
+    return {"nao-seguidores": sorted(following - followers), "mutuos": sorted(following & followers),
+            "fas": sorted(followers - following), "pendentes": list(lists.get("pending", [])),
+            "deixei-de-seguir": list(lists.get("unfollowed", []))}
+
+
+def meta_diff(old: dict, new: dict) -> dict[str, list[str]]:
+    """Entre duas exportações: quem deixou de seguir, novos seguidores, quem você passou a seguir ou deixou."""
+    of, nf = set(old.get("followers", [])), set(new.get("followers", []))
+    og, ng = set(old.get("following", [])), set(new.get("following", []))
+    return {"sairam": sorted(of - nf), "entraram": sorted(nf - of), "comecei": sorted(ng - og),
+            "parei": sorted(og - ng), "novos-mutuos": sorted((nf & ng) - (of & og))}
 
 
 class FollowStore:
@@ -122,6 +269,13 @@ class FollowStore:
         self.keep = {str(p) for p in (raw.get("keep") if isinstance(raw.get("keep"), list) else []) if PK_RE.match(str(p))}
         self.selected = {str(p) for p in (raw.get("selected") if isinstance(raw.get("selected"), list) else [])
                          if PK_RE.match(str(p))}
+        self.selected_remove = {str(p) for p in (raw.get("selected_remove") if isinstance(raw.get("selected_remove"), list)
+                                                 else []) if PK_RE.match(str(p))}
+        self.removed_by_me = {str(p) for p in (raw.get("removed_by_me") if isinstance(raw.get("removed_by_me"), list)
+                                               else []) if PK_RE.match(str(p))}
+        hist = raw.get("history") if isinstance(raw.get("history"), list) else []
+        self.history = [[_num(h[0]), int(_num(h[1])), int(_num(h[2]))] for h in hist[-HISTORY_MAX:]
+                        if isinstance(h, list) and len(h) == 3]
         self.partial = self._parse_partial(raw.get("partial"))
         unf = _read(self.unf_path)
         self.unfollowers = [self._parse_unf(e) for e in (unf if isinstance(unf, list) else [])]
@@ -153,6 +307,8 @@ class FollowStore:
             "version": 1, "followers": self.followers, "following": self.following, "taken_at": self.taken_at,
             "checks": self.checks, "counts": self.counts, "keep": sorted(self.keep), "partial": self.partial,
             "selected": sorted(self.selected & set(self.following)),
+            "selected_remove": sorted(self.selected_remove & set(self.followers)),
+            "removed_by_me": sorted(self.removed_by_me), "history": self.history[-HISTORY_MAX:],
         })
 
     def _save_unf(self) -> None:
@@ -200,6 +356,9 @@ class FollowStore:
             raise ValueError("foto incompleta")
         first = not self.has_snapshot
         lost, gained = diff(self.followers, p["followers"]) if not first else ([], [])
+        mine = [pk for pk in lost if pk in self.removed_by_me]  # removidos pelo app não "deixaram de seguir"
+        lost = [pk for pk in lost if pk not in self.removed_by_me]
+        self.removed_by_me -= set(mine) | set(p["followers"])
         new_following = p["following"]
         by_pk = {e["pk"]: e for e in self.unfollowers}
         for pk in lost:
@@ -222,6 +381,7 @@ class FollowStore:
         self.following = new_following
         self.taken_at = now
         self.checks += 1
+        self.history.append([now, len(self.followers), len(self.following)])
         self.partial = None
         self.save()
         self._save_unf()
@@ -241,25 +401,38 @@ class FollowStore:
         for pk, e in self.following.items():
             if pk in self.followers:
                 continue
-            c = self.counts.get(pk)
-            out.append({"pk": pk, **e, "count": c[0] if c else None, "keep": pk in self.keep})
+            out.append(self._row(pk, e))
         out.sort(key=lambda x: x["u"].lower())
         return out
 
-    def split(self, threshold: int) -> dict[str, list[dict]]:
-        """Não seguidores separados em comuns, famosos e sem contagem (exclui a lista "manter")."""
-        groups = {"comuns": [], "famosos": [], "sem-contagem": []}
+    def _row(self, pk: str, e: dict) -> dict:
+        c = self.counts.get(pk)
+        u = {"pk": pk, **e, "count": c[0] if c else None, "keep": pk in self.keep}
+        u["ghost"], u["ghost_level"], u["ghost_why"] = ghost_score(u)
+        return u
+
+    def mutuals(self) -> list[dict]:
+        return sorted((self._row(pk, e) for pk, e in self.following.items() if pk in self.followers),
+                      key=lambda x: x["u"].lower())
+
+    def fans(self) -> list[dict]:
+        """Seguem você e você não segue de volta."""
+        return sorted((self._row(pk, e) for pk, e in self.followers.items() if pk not in self.following),
+                      key=lambda x: x["u"].lower())
+
+    def split(self, threshold: int, verified: bool = True) -> dict[str, list[dict]]:
+        """Não seguidores em comuns e famosos (verificado ou contagem >= limite); exclui a lista "manter"."""
+        groups = {"comuns": [], "famosos": []}
         for u in self.non_followers():
-            if u["keep"]:
-                continue
-            f = is_famous(u["count"], threshold)
-            groups["sem-contagem" if f is None else ("famosos" if f else "comuns")].append(u)
+            if not u["keep"]:
+                groups["famosos" if famous(u, threshold, verified) else "comuns"].append(u)
         return groups
 
-    def need_counts(self, now: float, limit: int = 1000) -> list[dict]:
-        """Não seguidores sem contagem recente de seguidores (para classificar famosos)."""
+    def need_counts(self, now: float, limit: int = 1000, verified: bool = True) -> list[dict]:
+        """Refinamento opcional: não seguidores sem contagem recente (verificados já contam como famosos)."""
         out = [u for u in self.non_followers()
-               if not u["keep"] and (u["pk"] not in self.counts or now - self.counts[u["pk"]][1] > COUNT_MAX_AGE)]
+               if not u["keep"] and not (verified and u["v"])
+               and (u["pk"] not in self.counts or now - self.counts[u["pk"]][1] > COUNT_MAX_AGE)]
         return out[:limit]
 
     def set_count(self, pk: str, count: int, now: float) -> None:
@@ -296,14 +469,24 @@ class FollowStore:
             self.save()
         return n
 
-    def set_selected(self, pks, on: bool) -> None:
-        """Seleção para o lote (fica salva entre abas e sessões). Mantidos e quem já não é seguido ficam fora."""
+    def set_selected(self, pks, on: bool, action: str = "unfollow") -> None:
+        """Seleção para o lote (fica salva entre abas e sessões). Mantidos ficam fora.
+        unfollow: só quem você segue; remove (remover seguidor): só quem segue você."""
+        target, pool = (self.selected, self.following) if action == "unfollow" else (self.selected_remove, self.followers)
         for pk in pks:
-            if on and pk in self.following and pk not in self.keep:
-                self.selected.add(pk)
+            if on and pk in pool and pk not in self.keep:
+                target.add(pk)
             elif not on:
-                self.selected.discard(pk)
+                target.discard(pk)
         self.save()
+
+    def record_removed(self, pk: str, now: float) -> None:
+        """Seguidor removido pelo app (sem bloquear): sai da lista de seguidores sem contar como "deixou de seguir"."""
+        e = self.followers.pop(pk, None)
+        self.selected_remove.discard(pk)
+        self.removed_by_me.add(pk)
+        self.save()
+        self.audit("removi-seguidor", now, pk=pk, user=(e or {}).get("u", ""))
 
     def record_unfollowed(self, pk: str, now: float, mode: str = "") -> None:
         """Remoção feita pelo app: tira da lista de seguindo e registra na auditoria."""
@@ -326,27 +509,34 @@ class FollowStore:
         done = [str(p) for p in (raw.get("done") if isinstance(raw.get("done"), list) else []) if PK_RE.match(str(p))]
         errors = {str(k): _text(v, 160) for k, v in (raw.get("errors") if isinstance(raw.get("errors"), dict) else {}).items()
                   if PK_RE.match(str(k))}
-        return {"mode": raw["mode"], "items": items[:5000], "done": done[:5000], "errors": errors,
+        remove = [str(p) for p in (raw.get("remove") if isinstance(raw.get("remove"), list) else []) if str(p) in items]
+        return {"mode": raw["mode"], "items": items[:5000], "done": done[:5000], "errors": errors, "remove": remove,
                 "created_at": _num(raw.get("created_at")), "threshold": max(0, int(_num(raw.get("threshold"))))}
 
     def new_batch(self, mode: str, pks: list[str], threshold: int, now: float) -> dict:
         if mode not in MODES:
             raise ValueError("modo inválido")
         valid = [p for p in dict.fromkeys(pks) if PK_RE.match(p) and p in self.following and p not in self.keep]
-        batch = {"mode": mode, "items": valid[:5000], "done": [], "errors": {}, "created_at": now, "threshold": threshold}
+        batch = {"mode": mode, "items": valid[:5000], "done": [], "errors": {}, "remove": [], "created_at": now,
+                 "threshold": threshold}
         _atomic_write(self.batch_path, batch)
         self.audit("lote-inicio", now, mode=mode, total=len(batch["items"]), threshold=threshold)
         return batch
 
-    def extend_batch(self, batch: dict, pks) -> int:
-        """Acrescenta ao lote quem ainda é seguido, não está em "manter" nem já no lote. Devolve quantos entraram."""
+    def extend_batch(self, batch: dict, pks, action: str = "unfollow") -> int:
+        """Acrescenta ao lote (deixar de seguir quem você segue, ou remover quem segue você), fora "manter"
+        e quem já está no lote. Devolve quantos entraram."""
+        pool = self.following if action == "unfollow" else self.followers
+        batch.setdefault("remove", [])
         have = set(batch["items"])
         added = 0
         for pk in dict.fromkeys(pks):
-            if PK_RE.match(str(pk)) and pk in self.following and pk not in self.keep and pk not in have:
+            if PK_RE.match(str(pk)) and pk in pool and pk not in self.keep and pk not in have:
                 if len(batch["items"]) >= 5000:
                     break
                 batch["items"].append(pk)
+                if action == "remove":
+                    batch["remove"].append(pk)
                 batch["errors"].pop(pk, None)
                 have.add(pk)
                 added += 1
@@ -358,6 +548,8 @@ class FollowStore:
     def remove_from_batch(self, batch: dict, pk: str) -> bool:
         if pk in batch["items"] and pk not in batch["done"]:
             batch["items"].remove(pk)
+            if pk in batch.get("remove", []):
+                batch["remove"].remove(pk)
             batch["errors"].pop(pk, None)
             self.save_batch(batch)
             return True
@@ -386,11 +578,40 @@ class FollowStore:
     def next_in_batch(self, batch: dict) -> str | None:
         """Próximo pk a remover: pula feitos, com erro, marcados como "manter" e quem já não é seguido."""
         done = set(batch["done"])
+        remove = set(batch.get("remove", []))
         for pk in batch["items"]:
-            if pk in done or pk in batch["errors"] or pk in self.keep or pk not in self.following:
+            pool = self.followers if pk in remove else self.following
+            if pk in done or pk in batch["errors"] or pk in self.keep or pk not in pool:
                 continue
             return pk
         return None
+
+    # ---------- exportação da Meta (importada) ----------
+    def save_meta(self, lists: dict, now: float) -> dict | None:
+        """Guarda a importação (só @) e devolve a anterior para comparar."""
+        prev = self.load_meta()
+        rec = {"at": now, **{k: [x for x in v if USERNAME_RE.match(x)][:MAX_USERS] for k, v in lists.items()
+                             if k in META_FILES}}
+        if prev:
+            _atomic_write(self.dir / "meta-prev.json", prev)
+        _atomic_write(self.dir / "meta.json", rec)
+        self.audit("importacao-meta", now, followers=len(rec.get("followers", [])),
+                   following=len(rec.get("following", [])), pending=len(rec.get("pending", [])))
+        return prev
+
+    def load_meta(self, prev: bool = False) -> dict | None:
+        raw = _read(self.dir / ("meta-prev.json" if prev else "meta.json"))
+        if not isinstance(raw, dict):
+            return None
+        out = {"at": _num(raw.get("at"))}
+        for k in META_FILES:
+            v = raw.get(k)
+            out[k] = [x for x in v if isinstance(x, str) and USERNAME_RE.match(x)] if isinstance(v, list) else []
+        return out
+
+    def pks_by_username(self, names, pool: str = "following") -> list[str]:
+        idx = {e["u"].lower(): pk for pk, e in (self.following if pool == "following" else self.followers).items()}
+        return [idx[n] for n in names if n in idx]
 
     # ---------- auditoria ----------
     def audit(self, event: str, now: float | None = None, **fields_) -> None:

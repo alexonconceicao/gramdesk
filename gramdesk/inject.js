@@ -817,6 +817,7 @@
   const slimUser = (u) => ({
     pk: String(u.pk || u.pk_id || u.id || ''), username: String(u.username || ''),
     full_name: clip(u.full_name || '', 120), is_verified: !!u.is_verified, is_private: !!u.is_private,
+    anon_pic: !!u.has_anonymous_profile_picture,
   });
   const followOp = async (op, a) => {
     const gap = Date.now() - lastApiAt;
@@ -857,6 +858,20 @@
       });
       const fs = j && j.friendship_status;
       if (j.status !== 'ok' || (fs && fs.following)) throw new Error('o Instagram não confirmou a remoção');
+      return { ok: true };
+    }
+    if (op === 'remove_follower') {
+      if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
+      const csrf = cookie('csrftoken');
+      if (!csrf) throw new Error('sem sessão');
+      const j = await apiJson('/api/v1/friendships/remove_follower/' + a + '/', {
+        method: 'POST',
+        headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
+          'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'container_module=profile&user_id=' + a,
+      });
+      const fs = j && j.friendship_status;
+      if (j.status !== 'ok' || (fs && fs.followed_by)) throw new Error('o Instagram não confirmou a remoção do seguidor');
       return { ok: true };
     }
     throw new Error('operação inválida');
@@ -1018,7 +1033,7 @@
     },
     follow(id, op, a) {
       if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32 || researchJobs.size >= 1) return false;
-      if (!['me', 'followers', 'following', 'profile', 'unfollow'].includes(op)) return false;
+      if (!['me', 'followers', 'following', 'profile', 'unfollow', 'remove_follower'].includes(op)) return false;
       results.set(id, null);
       followOp(op, a).then(
         (data) => results.set(id, { ok: true, data }),

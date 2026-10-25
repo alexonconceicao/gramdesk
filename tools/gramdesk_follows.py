@@ -4,7 +4,7 @@
 Uso:
   gramdesk-follows status                      # resumo da conta: seguidores, não seguidores, famosos, lote
   gramdesk-follows check                       # refaz a checagem e registra quem deixou de seguir
-  gramdesk-follows list nao-seguidores|famosos|deixaram [--json]
+  gramdesk-follows list nao-seguidores|famosos|mutuos|fas|deixaram [--json]
   Opção global: --account NOME (padrão: a conta selecionada na janela)
 
 Feito para rodar uma vez por dia (cron ou timer do systemd). A checagem lê as listas de seguidores e
@@ -141,7 +141,7 @@ def print_summary(d: dict) -> None:
     print(f"Última checagem: {when(d.get('taken_at'))}  ({d.get('checks', 0)} no total)")
     print(f"Seguidores: {d.get('followers', 0)} · seguindo: {d.get('following', 0)}")
     print(f"Não seguem de volta: {d.get('non_followers', 0)} (comuns {d.get('common', 0)}, famosos {d.get('famous', 0)}, "
-          f"sem contagem {d.get('unknown', 0)}, mantidos {d.get('keep', 0)})")
+          f"mantidos {d.get('keep', 0)}) · mútuos {d.get('mutuals', 0)} · fãs {d.get('fans', 0)}")
     print(f"Deixaram de seguir (lista permanente): {d.get('unfollowers', 0)}")
     b = d.get("batch")
     if b:
@@ -157,7 +157,7 @@ def main(argv=None) -> int:
     sub.add_parser("status")
     sub.add_parser("check")
     lp = sub.add_parser("list")
-    lp.add_argument("what", choices=("nao-seguidores", "famosos", "deixaram"))
+    lp.add_argument("what", choices=("nao-seguidores", "famosos", "mutuos", "fas", "deixaram"))
     lp.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
 

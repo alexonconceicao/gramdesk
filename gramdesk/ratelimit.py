@@ -69,6 +69,7 @@ class Limits:
     unfollow_daily: int = 100  # teto rígido em UNFOLLOW_HARD_CAP
     unfollow_long_every: int = 10  # a cada N remoções, uma pausa longa (UNFOLLOW_LONG)
     famous_threshold: int = 10000  # seguidores a partir dos quais o perfil conta como famoso
+    famous_verified: int = 1  # selo de verificado conta como famoso (sem ir perfil a perfil)
     follow_check: int = 1  # checagem diária automática de quem deixou de seguir (1 liga, 0 desliga)
 
     RANGES = {
@@ -91,6 +92,7 @@ class Limits:
         "unfollow_daily": (10, UNFOLLOW_HARD_CAP),
         "unfollow_long_every": (5, 30),
         "famous_threshold": (1000, 100_000_000),
+        "famous_verified": (0, 1),
         "follow_check": (0, 1),
     }
 

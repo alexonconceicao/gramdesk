@@ -67,7 +67,7 @@ def test_followers_page(tmp_path):
     url = out["calls"][0]["url"]
     assert url.startswith("/api/v1/friendships/4242/followers/?count=50") and "max_id=QVFD" in url
     assert out["result"] == {"ok": True, "data": {"users": [{"pk": "11", "username": "ana", "full_name": "Ana",
-                                                            "is_verified": True, "is_private": False}],
+                                                            "is_verified": True, "is_private": False, "anon_pic": False}],
                                                  "cursor": "QVFE", "more": True}}
 
 
@@ -94,3 +94,12 @@ def test_invalid_args_and_no_session_never_hit_network(tmp_path):
     out = run(tmp_path, "following", "", cookie="mid=x")
     assert out["calls"] == [] and out["result"]["error"] == "sem sessão"
     assert run(tmp_path, "apagar", "1")["accepted"] is False
+
+
+def test_remove_follower_checks_followed_by(tmp_path):
+    out = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": False}, "status": "ok"}))
+    c = out["calls"][0]
+    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/remove_follower/55/"
+    assert out["result"] == {"ok": True, "data": {"ok": True}}
+    bad = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": True}, "status": "ok"}))
+    assert bad["result"]["ok"] is False

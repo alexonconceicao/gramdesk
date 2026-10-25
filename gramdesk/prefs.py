@@ -500,9 +500,14 @@ class PreferencesPage(QWidget):
         spin.setValue(lim.famous_threshold)
         spin.setMinimumWidth(190)
         spin.editingFinished.connect(lambda: set_limit("famous_threshold", spin.value()))
-        b.addWidget(ui.setting_row("Limite de famoso",
-                                   "Não seguidores com essa quantidade de seguidores ou mais vão para a lista de famosos "
-                                   "e saem do lote de não seguidores comuns.", spin))
+        verified = ui.Toggle(bool(lim.famous_verified))
+        verified.toggled.connect(lambda on: set_limit("famous_verified", 1 if on else 0))
+        b.addWidget(ui.setting_row("Verificado é famoso",
+                                   "Usa o selo que já vem na lista de quem você segue: separa famosos na hora, sem abrir "
+                                   "perfil por perfil.", verified))
+        b.addWidget(ui.setting_row("Limite de famoso (refinamento)",
+                                   "Opcional: com \"Refinar famosos\", o app busca o número de seguidores de quem não tem "
+                                   "selo, devagar, e quem passar deste valor também vira famoso.", spin))
 
         def seg(key, options, current):
             w = ui.Segmented([(str(v), lbl) for v, lbl in options], str(current))

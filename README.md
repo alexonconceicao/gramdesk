@@ -29,9 +29,13 @@ Downloads ficam em `~/Downloads/Gramdesk/<conta>/`.
 
 Ícone de pessoas no cabeçalho. Usa a conta aberta, numa página oculta da mesma sessão, uma requisição por vez.
 
-- **Checar agora**: lê a lista de seguidores e de quem você segue (páginas de 50) e compara com a checagem anterior.
-- **Não seguidores**: quem você segue e não segue de volta, abaixo do limite de famoso.
-- **Não seguidores famosos**: os que têm seguidores acima do limite (padrão 10 mil, ajustável em Preferências > Seguidores). A contagem de seguidores de cada perfil é buscada sob demanda (*Contar seguidores*) e vale 30 dias; perfis sem contagem ficam na aba *Sem contagem* e não entram em lote.
+- **Checar agora**: baixa a lista completa de seguidores e de quem você segue (páginas de 50) e cruza as duas, sem abrir perfil por perfil. Compara com a checagem anterior.
+- **Abas**: Não seguidores, Famosos, Mútuos, Fãs (seguem você e você não segue), Manter, Lote, Deixaram, mais Histórico (gráfico), Exportação da Meta e Auditoria.
+- **Famosos na hora**: conta verificada (selo que já vem na lista) é famosa. Opcional: *Refinar famosos* busca o número de seguidores de quem não tem selo, devagar, e usa o limite das Preferências (padrão 10 mil).
+- **Pontuação de conta fantasma (0 a 100)**: heurística local pelo @, nome e foto (sem requisição a mais), marca suspeito, provável inativo ou provável bot. Filtros: verificados, privados, sem foto, suspeitos.
+- **Remover seguidor (sem bloquear)**: na aba Fãs, o lote remove a pessoa da sua lista de seguidores, com o mesmo ritmo das remoções. Quem você removeu não aparece como "deixou de seguir".
+- **CSV e relatório**: CSV da aba atual e relatório HTML (números, gráfico, listas) em `Downloads/Gramdesk/Seguidores/`; PDF pelo Imprimir do navegador.
+- **Exportação oficial da Meta**: importe o .zip ou a pasta de "Baixar suas informações" (HTML ou JSON). Mostra não seguidores, mútuos, fãs, pedidos pendentes e a diferença para a importação anterior, sem acessar o Instagram, e marca no lote quem ainda consta na checagem.
 - **Seleção para o lote**: caixa em cada perfil, em qualquer aba (comuns, famosos, sem contagem, deixaram de seguir). A seleção vale entre as abas e fica salva. A barra de baixo mostra quantos (e quantos famosos) estão marcados, com *Selecionar visíveis*, *Limpar seleção*, *Manter* e *Deixar de seguir*. O filtro age na hora.
 - **Manter (whitelist)**: aba própria; perfis mantidos nunca entram em lote, nem se estiverem selecionados.
 - **Lote ao vivo**: aba *Lote* com cada perfil como *Na fila*, *Removendo agora*, *Removido* ou *Erro*, atualizando sozinho. Dá para acrescentar perfis com o lote rodando (*Adicionar ao lote*), tirar quem ainda não foi removido, pausar, retomar e descartar. O lote fica salvo e é retomado de onde parou.

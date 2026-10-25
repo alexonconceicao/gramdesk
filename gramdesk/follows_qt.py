@@ -23,7 +23,7 @@ MAX_CONSECUTIVE_ERRORS = 3
 AUTO_CHECK_HOURS = 20.0
 PARTIAL_MAX_AGE = 3 * 86400
 ACTION_BLOCK_RE = re.compile(r"feedback_required|restringimos|we restrict|action blocked|bloquead", re.I)
-KIND_LABEL = {"check": "Checagem de seguidores", "counts": "Contagem de seguidores", "unfollow": "Deixar de seguir"}
+KIND_LABEL = {"check": "Checagem de seguidores", "counts": "Contagem de seguidores", "unfollow": "Lote (deixar de seguir / remover seguidor)"}
 
 
 class FollowsController(QObject):
@@ -60,23 +60,26 @@ class FollowsController(QObject):
     def running_unfollow(self, acc_id: str) -> bool:
         return self.job is not None and self.job["kind"] == "unfollow" and self.job["acc"] == acc_id
 
-    def queue(self, s, pks: list[str]) -> tuple[int, str]:
-        """Põe perfis no lote: entra no lote em andamento, no lote salvo ou cria um novo, e inicia se der."""
+    def split(self, st) -> dict[str, list[dict]]:
+        lim = self.limits()
+        return st.split(lim.famous_threshold, bool(lim.famous_verified))
+
+    def queue(self, s, pks: list[str], action: str = "unfollow") -> tuple[int, str]:
+        """Põe perfis no lote (deixar de seguir ou remover seguidor): entra no lote em andamento, no salvo ou
+        cria um novo, e inicia se der."""
         acc = s.account.id
         st = self.store(acc)
         if self.running_unfollow(acc):
-            added = st.extend_batch(self.job["batch"], pks)
+            added = st.extend_batch(self.job["batch"], pks, action)
             for pk in pks:
                 self.item.emit(pk, st.batch_status(self.job["batch"], pk) or "fora")
             return OK, f"{added} adicionado(s) ao lote em andamento."
         batch = st.load_batch()
         if batch is None:
-            batch = st.new_batch("selecao", list(pks), self.limits().famous_threshold, time.time())
-            added = len(batch["items"])
-        else:
-            added = st.extend_batch(batch, pks)
+            batch = st.new_batch("selecao", [], self.limits().famous_threshold, time.time())
+        added = st.extend_batch(batch, pks, action)
         if not st.next_in_batch(batch):
-            return ERROR, "Nada para remover (mantidos e quem você já não segue ficam fora)."
+            return ERROR, "Nada para fazer (mantidos e quem já saiu ficam fora)."
         if self.busy:
             self._queued_start = acc
             self.changed.emit()
@@ -127,12 +130,15 @@ class FollowsController(QObject):
     def summary(self, acc_id: str) -> dict:
         st = self.store(acc_id)
         lim = self.limits()
-        groups = st.split(lim.famous_threshold)
-        batch = st.load_batch()
+        groups = self.split(st)
+        batch = self.batch(acc_id)
         return {
             "taken_at": st.taken_at, "checks": st.checks, "followers": len(st.followers), "following": len(st.following),
             "non_followers": sum(len(g) for g in groups.values()), "famous": len(groups["famosos"]),
-            "common": len(groups["comuns"]), "unknown": len(groups["sem-contagem"]), "keep": len(st.keep),
+            "common": len(groups["comuns"]), "keep": len(st.keep),
+            "unknown": len(st.need_counts(time.time(), verified=bool(lim.famous_verified))),
+            "mutuals": sum(1 for pk in st.following if pk in st.followers),
+            "fans": sum(1 for pk in st.followers if pk not in st.following),
             "unfollowers": len(st.unfollowers), "partial": st.partial is not None,
             "batch": {"mode": batch["mode"], "total": len(batch["items"]), "done": len(batch["done"]),
                       "errors": len(batch["errors"])} if batch else None,
@@ -167,7 +173,7 @@ class FollowsController(QObject):
         elif kind == "counts":
             if not st.has_snapshot:
                 return ERROR, "Faça uma checagem de seguidores antes."
-            job["todo"] = st.need_counts(now, COUNTS_PER_RUN)
+            job["todo"] = st.need_counts(now, COUNTS_PER_RUN, bool(lim.famous_verified))
             if not job["todo"]:
                 return ERROR, "Todos os não seguidores já têm contagem recente."
         elif kind == "unfollow":
@@ -289,10 +295,13 @@ class FollowsController(QObject):
                 return
             job["pk"] = pk
             self.item.emit(pk, "ativo")
-            user = job["store"].following.get(pk, {}).get("u", "?")
-            self._emit(f"Deixando de seguir @{user} ({job['done'] + 1} nesta sessão, "
+            remove = pk in batch.get("remove", [])
+            st = job["store"]
+            user = (st.followers if remove else st.following).get(pk, {}).get("u", "?")
+            what = "Removendo o seguidor" if remove else "Deixando de seguir"
+            self._emit(f"{what} @{user} ({job['done'] + 1} nesta sessão, "
                        f"{len(batch['done']) + 1} de {len(batch['items'])} no lote)...")
-            s.follow_call(job["page"], "unfollow", pk, self._on_unfollow)
+            s.follow_call(job["page"], "remove_follower" if remove else "unfollow", pk, self._on_unfollow)
 
     # ---------------------------------------------------------------- respostas
     def _common(self, res: dict):
@@ -409,7 +418,10 @@ class FollowsController(QObject):
             nxt = self.win.rate.record_unfollow(job["acc"], self.limits(), now)
             if job["slow"] > 1:  # depois de aviso de limite, intervalo multiplicado
                 job["hold_until"] = max(job["hold_until"], now + (nxt - now) * job["slow"])
-            st.record_unfollowed(pk, now, job["mode"])
+            if pk in batch.get("remove", []):
+                st.record_removed(pk, now)
+            else:
+                st.record_unfollowed(pk, now, job["mode"])
             batch["done"].append(pk)
             st.save_batch(batch)
             job["done"] += 1
@@ -449,7 +461,7 @@ class FollowsController(QObject):
         job = self.job
         job["store"].save()
         job["store"].audit("contagem", n=job["done"])
-        left = len(job["store"].need_counts(time.time()))
+        left = len(job["store"].need_counts(time.time(), verified=bool(self.limits().famous_verified)))
         self._end(OK, f"Contagem concluída: {job['done']} perfis." + (f" Faltam {left}; rode de novo depois." if left else ""))
 
     def _finish_batch(self):
@@ -541,15 +553,19 @@ class FollowsController(QObject):
         if op == "list":
             what = str(req.get("what", ""))
             st = self.store(acc)
-            groups = st.split(self.limits().famous_threshold)
+            groups = self.split(st)
             if what == "nao-seguidores":
-                items = groups["comuns"] + groups["sem-contagem"]
+                items = groups["comuns"]
             elif what == "famosos":
                 items = groups["famosos"]
+            elif what == "mutuos":
+                items = st.mutuals()
+            elif what == "fas":
+                items = st.fans()
             elif what == "deixaram":
                 items = sorted(st.unfollowers, key=lambda e: -e["lost_at"])
             else:
-                answer(ERROR, "Lista inválida (nao-seguidores, famosos, deixaram).")
+                answer(ERROR, "Lista inválida (nao-seguidores, famosos, mutuos, fas, deixaram).")
                 return
             answer(OK, "", {"account": s.account.name, "taken_at": st.taken_at, "items": items[:5000]})
             return

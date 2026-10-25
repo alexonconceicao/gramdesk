@@ -76,19 +76,75 @@ def test_unfollowers_list_is_permanent_and_audited(tmp_path, st):
     assert events.count("deixou-de-seguir") == 2 and "voltou-a-seguir" in events and events.count("checagem") == 4
 
 
-def test_split_famous_common_unknown_and_keep(st):
-    snap(st, [u(1, "ana")], [u(1, "ana"), u(2, "star"), u(3, "zeca"), u(4, "novo"), u(5, "amigo")], NOW)
+def test_split_famous_by_verified_badge_or_count(st):
+    snap(st, [u(1, "ana")], [u(1, "ana"), u(2, "star"), u(3, "zeca"), u(4, "novo"), u(5, "amigo"),
+                             u(6, "marca", is_verified=True)], NOW)
     st.set_count("2", 50_000, NOW)
     st.set_count("3", 120, NOW)
-    st.set_count("5", 90, NOW)
     st.set_keep("5", True, NOW)
     g = st.split(10_000)
-    assert [x["u"] for x in g["famosos"]] == ["star"]
-    assert [x["u"] for x in g["comuns"]] == ["zeca"]
-    assert [x["u"] for x in g["sem-contagem"]] == ["novo"]
-    assert [x["u"] for x in st.need_counts(NOW)] == ["novo"]
+    assert [x["u"] for x in g["famosos"]] == ["marca", "star"]
+    assert [x["u"] for x in g["comuns"]] == ["novo", "zeca"]  # sem contagem e sem selo = comum, sem ir perfil a perfil
+    assert [x["u"] for x in st.split(10_000, verified=False)["famosos"]] == ["star"]
+    assert [x["u"] for x in st.need_counts(NOW)] == ["novo"]  # verificado já é famoso; mantido fica fora
     assert [x["u"] for x in st.need_counts(NOW + follows.COUNT_MAX_AGE + 1)] == ["novo", "star", "zeca"]
-    assert st.split(100)["famosos"][0]["u"] == "star" and len(st.split(100)["famosos"]) == 2
+
+
+def test_mutuals_fans_and_ghost(st):
+    snap(st, [u(1, "ana", full_name="Ana"), u(2, "xk2024999", full_name="", anon_pic=True), u(3, "fan")],
+         [u(1, "ana", full_name="Ana"), u(4, "outro")], NOW)
+    assert [x["u"] for x in st.mutuals()] == ["ana"]
+    assert [x["u"] for x in st.fans()] == ["fan", "xk2024999"]
+    bot = next(x for x in st.fans() if x["u"] == "xk2024999")
+    assert bot["ghost"] >= 65 and bot["ghost_level"] == "bot" and "sem foto de perfil" in bot["ghost_why"]
+    assert follows.ghost_score({"u": "qwertyzz", "n": "", "v": True})[0] == 0
+
+
+def test_remove_follower_batch_and_no_false_unfollower(st):
+    snap(st, [u(1, "a"), u(2, "b")], [u(9, "z")], NOW)
+    st.set_selected(["1", "9"], True, action="remove")
+    assert st.selected_remove == {"1"}
+    b = st.new_batch("selecao", [], 1, NOW)
+    assert st.extend_batch(b, ["1"], action="remove") == 1 and st.extend_batch(b, ["9"]) == 1
+    assert st.next_in_batch(b) == "1"
+    st.record_removed("1", NOW)
+    b["done"].append("1")
+    assert st.next_in_batch(b) == "9" and "1" not in st.followers
+    s = snap(st, [u(2, "b")], [u(9, "z")], NOW + 100)
+    assert s["lost"] == 0 and st.unfollowers == []  # removido pelo app não vira "deixou de seguir"
+    assert st.history[-1][1:] == [1, 1]
+
+
+def test_meta_export_parse_and_diff(tmp_path):
+    import zipfile
+
+    html_followers = '<div><a target="_blank" href="https://www.instagram.com/ana">ana</a></div>' \
+                     '<a href="https://www.instagram.com/bia/">bia</a><a href="https://www.instagram.com/explore/">x</a>'
+    following_json = json.dumps({"relationships_following": [
+        {"string_list_data": [{"href": "https://www.instagram.com/ana", "value": "ana", "timestamp": 1}]},
+        {"title": "caio", "string_list_data": [{"href": "https://www.instagram.com/_u/caio", "timestamp": 2}]}]})
+    z = tmp_path / "export.zip"
+    with zipfile.ZipFile(z, "w") as f:
+        f.writestr("connections/followers_and_following/followers_1.html", html_followers)
+        f.writestr("connections/followers_and_following/following.json", following_json)
+        f.writestr("connections/followers_and_following/pending_follow_requests.html",
+                   '<a href="https://www.instagram.com/dani">dani</a>')
+        f.writestr("outro/messages.html", '<a href="https://www.instagram.com/naoconta">x</a>')
+    lists = follows.read_meta_export(z)
+    assert lists["followers"] == ["ana", "bia"] and lists["following"] == ["ana", "caio"] and lists["pending"] == ["dani"]
+    an = follows.meta_analysis(lists)
+    assert an["nao-seguidores"] == ["caio"] and an["mutuos"] == ["ana"] and an["fas"] == ["bia"]
+    d = follows.meta_diff({"followers": ["ana", "eva"], "following": ["ana"]}, lists)
+    assert d["sairam"] == ["eva"] and d["entraram"] == ["bia"] and d["comecei"] == ["caio"]
+    with pytest.raises(ValueError):
+        follows.read_meta_export(tmp_path / "nada")
+
+
+def test_meta_import_saved_with_previous(tmp_path, st):
+    st.save_meta({"followers": ["ana"], "following": ["bia"], "pending": [], "unfollowed": []}, NOW)
+    prev = st.save_meta({"followers": ["ana", "caio"], "following": ["bia"], "pending": [], "unfollowed": []}, NOW + 1)
+    assert prev["followers"] == ["ana"] and st.load_meta(prev=True)["followers"] == ["ana"]
+    assert st.load_meta()["followers"] == ["ana", "caio"]
 
 
 def test_batch_skips_keep_and_not_following(st):

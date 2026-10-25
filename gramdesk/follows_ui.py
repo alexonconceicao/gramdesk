@@ -1,14 +1,18 @@
-"""Tela de Seguidores: checagem, não seguidores, famosos, seleção para o lote, whitelist ("manter"),
-lote de remoções ao vivo, quem deixou de seguir e auditoria."""
+"""Tela de Seguidores: checagem (listas completas cruzadas), não seguidores, famosos, mútuos, fãs, seleção para
+o lote, lista de manter, lote ao vivo (deixar de seguir e remover seguidor), quem deixou de seguir, histórico,
+pontuação de conta fantasma, filtros, CSV, relatório, exportação oficial da Meta e auditoria."""
 
 from __future__ import annotations
 
 import math
 import time
+from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import QPointF, Qt, QTimer, QUrl
+from PyQt6.QtGui import QColor, QDesktopServices, QPainter, QPen
 from PyQt6.QtWidgets import (
     QCheckBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLineEdit,
@@ -18,12 +22,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from . import follows, ui
+from . import follows, follows_report, ui
 from .research_ui import _button, _label
 
-LIST_TABS = ("comuns", "famosos", "sem-contagem", "mantidos")
+LIST_TABS = ("comuns", "famosos", "mutuos", "fas", "mantidos")
+SELECT_TABS = (*LIST_TABS, "deixaram")
 MAX_ROWS = 3000
-STATUS_TEXT = {"pendente": "Na fila", "ativo": "Removendo agora...", "removido": "Removido", "erro": "Erro"}
+STATUS_TEXT = {"pendente": "Na fila", "ativo": "Agora...", "removido": "Feito", "erro": "Erro"}
+GHOST_TEXT = {"bot": "provável bot", "inativo": "provável inativo", "suspeito": "suspeito"}
+FILTERS = (("v", "Verificados"), ("p", "Privados"), ("a", "Sem foto"), ("g", "Suspeitos"))
 AUDIT_TEXT = {
     "checagem": lambda r: (f"Checagem: {r.get('followers', 0)} seguidores, {r.get('following', 0)} seguindo, "
                            f"{r.get('lost', 0)} deixaram de seguir, {r.get('gained', 0)} novos"
@@ -33,15 +40,18 @@ AUDIT_TEXT = {
     "voltou-a-seguir": lambda r: f"@{r.get('user', '?')} voltou a seguir",
     "deixei-de-seguir": lambda r: f"Você deixou de seguir @{r.get('user', '?')}"
                                   + (f" ({_fmt_count(r['count'])} seguidores)" if isinstance(r.get("count"), int) else ""),
+    "removi-seguidor": lambda r: f"Você removeu o seguidor @{r.get('user', '?')} (sem bloquear)",
     "lote-inicio": lambda r: f"Lote ({_mode_label(r.get('mode'))}): {r.get('total', 0)} perfis entraram",
-    "lote-pausa": lambda r: f"Lote pausado ({r.get('reason', '')}), {r.get('done', 0)} removidos nesta sessão",
-    "lote-fim": lambda r: f"Lote concluído: {r.get('done', 0)} removidos, {r.get('errors', 0)} com erro",
+    "lote-pausa": lambda r: f"Lote pausado ({r.get('reason', '')}), {r.get('done', 0)} feitos nesta sessão",
+    "lote-fim": lambda r: f"Lote concluído: {r.get('done', 0)} feitos, {r.get('errors', 0)} com erro",
     "contagem": lambda r: f"Contagem de seguidores: {r.get('n', 0)} perfis",
     "bloqueio": lambda r: f"Bloqueio do Instagram ({r.get('kind', '')}); resfriamento até {r.get('cooldown_until', '?')}",
     "desacelerar": lambda r: (f"O Instagram pediu calma ({r.get('task', '')}): pausa de {r.get('minutes', '?')} min, "
                               f"ritmo {r.get('slow', '?')}x mais lento, seguiu sozinho"),
     "manter": lambda r: f"@{r.get('user', '?')} entrou na lista de manter",
     "desmarcar-manter": lambda r: f"@{r.get('user', '?')} saiu da lista de manter",
+    "importacao-meta": lambda r: (f"Exportação da Meta importada: {r.get('followers', 0)} seguidores, "
+                                  f"{r.get('following', 0)} seguindo, {r.get('pending', 0)} pedidos pendentes"),
 }
 
 
@@ -74,6 +84,43 @@ def estimate(n: int, lim) -> str:
     return f"cerca de {h} h {m:02d} min" if h else f"cerca de {m} min"
 
 
+class HistoryChart(QWidget):
+    """Seguidores e seguindo ao longo das checagens."""
+
+    def __init__(self, history: list[list]):
+        super().__init__()
+        self.history = [h for h in history if h[0] > 0][-300:]
+        self.setMinimumHeight(220)
+
+    def paintEvent(self, _e):  # noqa: N802
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h, pad = self.width(), self.height(), 34
+        p.setPen(QColor(ui.MUTED))
+        if len(self.history) < 2:
+            p.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "O gráfico aparece a partir da segunda checagem.")
+            return
+        t0, t1 = self.history[0][0], self.history[-1][0]
+        vals = [v for x in self.history for v in (x[1], x[2])]
+        lo, hi = min(vals), max(vals)
+        hi = hi if hi > lo else lo + 1
+
+        def pt(t, v):
+            return QPointF(pad + (t - t0) / max(1.0, t1 - t0) * (w - 2 * pad - 90),
+                           h - pad - (v - lo) / (hi - lo) * (h - 2 * pad))
+
+        p.drawText(4, pad, str(hi))
+        p.drawText(4, h - pad, str(lo))
+        p.drawText(pad, h - 8, time.strftime("%d/%m", time.localtime(t0)))
+        p.drawText(w - pad - 140, h - 8, time.strftime("%d/%m %H:%M", time.localtime(t1)))
+        for idx, color, label in ((1, "#d62976", "seguidores"), (2, "#4f8cff", "seguindo")):
+            p.setPen(QPen(QColor(color), 2.4))
+            pts = [pt(x[0], x[idx]) for x in self.history]
+            for a, b in zip(pts, pts[1:]):
+                p.drawLine(a, b)
+            p.drawText(pts[-1] + QPointF(8, 4), f"{self.history[-1][idx]} {label}")
+
+
 class FollowsPage(QWidget):
     def __init__(self, win):
         super().__init__()
@@ -91,9 +138,10 @@ class FollowsPage(QWidget):
         self.bar = self._build_bar()
         outer.addWidget(self.bar)
         self.tab = "comuns"
+        self.meta_view = "nao-seguidores"
         self.filter = ""
-        self.status = None
-        self.info = None
+        self.flags: set[str] = set()
+        self.status = self.info = self.batch_info = None
         self.rows: dict[str, dict] = {}
         self._rendered_tab = ""
         self._filter_timer = QTimer(self, singleShot=True, interval=150, timeout=self._apply_filter)
@@ -109,9 +157,18 @@ class FollowsPage(QWidget):
         ctl = self.win.follows
         return cur, ctl.store(cur.account.id), ctl.batch(cur.account.id)
 
-    def _tab_items(self, st, lim) -> dict[str, list[dict]]:
-        groups = st.split(lim.famous_threshold)
-        groups["mantidos"] = [u for u in st.non_followers() if u["keep"]]
+    def _action(self) -> str:
+        return "remove" if self.tab == "fas" else "unfollow"
+
+    def _selected(self, st) -> set[str]:
+        return st.selected_remove if self._action() == "remove" else st.selected
+
+    def _tab_items(self, st) -> dict[str, list[dict]]:
+        groups = self.win.follows.split(st)
+        groups["mutuos"] = [u for u in st.mutuals() if not u["keep"]]
+        groups["fas"] = [u for u in st.fans() if not u["keep"]]
+        kept = {u["pk"]: u for u in st.non_followers() + st.mutuals() + st.fans() if u["keep"]}
+        groups["mantidos"] = sorted(kept.values(), key=lambda x: x["u"].lower())
         return groups
 
     # ---------------------------------------------------------------- sinais
@@ -158,7 +215,7 @@ class FollowsPage(QWidget):
         h = QHBoxLayout(page)
         h.setContentsMargins(36, 22, 36, 24)
         col = QWidget()
-        col.setMaximumWidth(920)
+        col.setMaximumWidth(960)
         v = QVBoxLayout(col)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(12)
@@ -177,36 +234,54 @@ class FollowsPage(QWidget):
             self._update_bar()
             return
         lim = self.win.follows.limits()
-        v.addWidget(self._head(cur, st, lim))
-        groups = self._tab_items(st, lim)
+        v.addWidget(self._head(cur, st))
+        groups = self._tab_items(st)
         pend = sum(1 for p in (batch or {}).get("items", []) if st.batch_status(batch, p) == "pendente")
         tabs = ui.Segmented([
             ("comuns", f"Não seguidores ({len(groups['comuns'])})"),
             ("famosos", f"Famosos ({len(groups['famosos'])})"),
-            ("sem-contagem", f"Sem contagem ({len(groups['sem-contagem'])})"),
+            ("mutuos", f"Mútuos ({len(groups['mutuos'])})"),
+            ("fas", f"Fãs ({len(groups['fas'])})"),
             ("mantidos", f"Manter ({len(groups['mantidos'])})"),
             ("lote", f"Lote ({pend})"),
             ("deixaram", f"Deixaram ({len(st.unfollowers)})"),
-            ("auditoria", "Auditoria"),
         ], self.tab)
         tabs.changed.connect(self._set_tab)
         v.addWidget(tabs, 0, Qt.AlignmentFlag.AlignLeft)
+        tabs2 = ui.Segmented([("historico", "Histórico"), ("meta", "Exportação da Meta"), ("auditoria", "Auditoria")],
+                             self.tab)
+        tabs2.changed.connect(self._set_tab)
+        v.addWidget(tabs2, 0, Qt.AlignmentFlag.AlignLeft)
 
-        if self.tab in (*LIST_TABS, "deixaram", "lote"):
+        if self.tab in (*SELECT_TABS, "lote"):
+            row = QHBoxLayout()
             self.field = QLineEdit(self.filter)
             self.field.setPlaceholderText("Filtrar por @usuário ou nome (na hora)")
             self.field.setClearButtonEnabled(True)
             self.field.textChanged.connect(self._filter_changed)
-            v.addWidget(self.field)
+            row.addWidget(self.field, 1)
+            if self.tab in LIST_TABS:
+                for key, text in FILTERS:
+                    chip = QCheckBox(text)
+                    chip.setToolTip("Mostrar só estes")
+                    chip.setChecked(key in self.flags)
+                    chip.toggled.connect(lambda on, key=key: self._flag(key, on))
+                    row.addWidget(chip)
+            v.addLayout(row)
 
-        if not st.has_snapshot and self.tab not in ("auditoria", "deixaram"):
-            v.addWidget(_label("Nenhuma checagem ainda. Clique em \"Checar agora\".", "muted"))
+        if not st.has_snapshot and self.tab not in ("auditoria", "deixaram", "meta", "historico"):
+            v.addWidget(_label("Nenhuma checagem ainda. Clique em \"Checar agora\": o app baixa a lista completa de "
+                               "seguidores e de quem você segue e cruza as duas.", "muted", True))
         elif self.tab in LIST_TABS:
             self._list_tab(v, groups[self.tab], batch, st)
         elif self.tab == "lote":
             self._batch_tab(v, st, batch, lim)
         elif self.tab == "deixaram":
             self._unfollowers_tab(v, st, batch)
+        elif self.tab == "historico":
+            self._history_tab(v, st)
+        elif self.tab == "meta":
+            self._meta_tab(v, st)
         else:
             self._audit_tab(v, st)
         v.addStretch()
@@ -216,7 +291,7 @@ class FollowsPage(QWidget):
         if keep_scroll:
             QTimer.singleShot(0, lambda: self.scroll.verticalScrollBar().setValue(keep_scroll))
 
-    def _head(self, cur, st, lim) -> QFrame:
+    def _head(self, cur, st) -> QFrame:
         ctl = self.win.follows
         panel = QFrame()
         panel.setObjectName("panel")
@@ -226,12 +301,18 @@ class FollowsPage(QWidget):
         row = QHBoxLayout()
         row.addWidget(_label(f"Conta: {cur.account.name}", "rowTitle"), 1)
         busy = ctl.busy
-        if not busy and st.has_snapshot and self.win.follows.summary(cur.account.id)["unknown"]:
-            cnt = _button("Contar seguidores", lambda: self._run("counts"), "", "search")
-            cnt.setToolTip("Busca quantos seguidores tem cada não seguidor, para separar os famosos.")
+        summ = ctl.summary(cur.account.id)
+        if st.has_snapshot:
+            row.addWidget(_button("CSV", self._export_csv, "", "download"))
+            row.addWidget(_button("Relatório", self._report, "", "info"))
+        if not busy and st.has_snapshot and summ["unknown"]:
+            cnt = _button("Refinar famosos", lambda: self._run("counts"), "", "search")
+            cnt.setToolTip(f"Opcional: busca o número de seguidores de {summ['unknown']} não seguidores sem selo, "
+                           "um por um e devagar. Sem isso, famoso = conta verificada.")
             cnt.setEnabled(cur.logged_in)
             row.addWidget(cnt)
         chk = _button("Checar agora", lambda: self._run("check"), "primaryWide", "refresh", "white")
+        chk.setToolTip("Baixa a lista completa de seguidores e de quem você segue e cruza as duas.")
         chk.setEnabled(not busy and cur.logged_in)
         row.addWidget(chk)
         f.addLayout(row)
@@ -240,7 +321,7 @@ class FollowsPage(QWidget):
         self._refresh_info()
         if not cur.logged_in:
             f.addWidget(_label("Entre na conta para usar esta tela.", "error", True))
-        u = ctl.summary(cur.account.id)["unfollow"]
+        u = summ["unfollow"]
         if not u["ok"] and u["reason"] == "cooldown":
             f.addWidget(_label(u["message"], "error", True))
         if busy:
@@ -263,12 +344,13 @@ class FollowsPage(QWidget):
             return
         s = self.win.follows.summary(cur.account.id)
         lim = self.win.follows.limits()
-        b = s["batch"]
+        fam = "verificado" + (f" ou {_fmt_count(lim.famous_threshold)}+ seguidores" if s["unknown"] < s["non_followers"] else "")
         txt = (f"Última checagem: {_when(st.taken_at)}  ·  {s['followers']} seguidores  ·  {s['following']} seguindo  ·  "
-               f"{s['non_followers']} não seguem de volta  ·  famoso = {_fmt_count(lim.famous_threshold)}+  ·  "
-               f"remoções hoje {s['unfollow']['unfollows_today']} de {s['unfollow']['unfollow_cap']}")
+               f"{s['non_followers']} não seguem de volta  ·  {s['mutuals']} mútuos  ·  {s['fans']} fãs  ·  "
+               f"famoso = {fam}  ·  ações hoje {s['unfollow']['unfollows_today']} de {s['unfollow']['unfollow_cap']}")
+        b = s["batch"]
         if b:
-            txt += f"  ·  lote: {b['done']} de {b['total']} removidos" + (f", {b['errors']} com erro" if b["errors"] else "")
+            txt += f"  ·  lote: {b['done']} de {b['total']} feitos" + (f", {b['errors']} com erro" if b["errors"] else "")
         try:
             self.info.setText(txt)
         except RuntimeError:
@@ -277,13 +359,13 @@ class FollowsPage(QWidget):
     # ---------------------------------------------------------------- abas
     def _list_tab(self, v, items: list[dict], batch, st):
         hint = {
-            "comuns": "Quem você segue e não segue de volta, abaixo do limite de famoso. Marque quem sai e clique "
-                      "em \"Deixar de seguir\" lá embaixo; a seleção vale entre as abas.",
-            "famosos": "Não seguidores acima do limite de famoso. Marque os que quer deixar de seguir; os demais "
-                       "podem ir para \"Manter\".",
-            "sem-contagem": "Ainda sem contagem de seguidores (podem ser famosos). Dá para selecionar mesmo assim "
-                            "ou usar \"Contar seguidores\" antes.",
-            "mantidos": "Whitelist: perfis aqui nunca entram em lote. Selecione e use \"Tirar de manter\" para liberar.",
+            "comuns": "Você segue e não seguem de volta. Marque quem sai e use a barra de baixo; a seleção vale entre as abas.",
+            "famosos": "Não seguem de volta e são famosos (verificados, ou com seguidores acima do limite se você refinou). "
+                       "Marque os que quer deixar; os demais podem ir para \"Manter\".",
+            "mutuos": "Vocês se seguem. Dá para deixar de seguir daqui também.",
+            "fas": "Seguem você e você não segue de volta. Aqui o lote REMOVE o seguidor (sem bloquear). A pontuação "
+                   "de fantasma ajuda a achar bots: use o filtro \"Suspeitos\".",
+            "mantidos": "Lista de manter: nunca entram em lote. Marque e use \"Tirar de manter\" para liberar.",
         }[self.tab]
         v.addWidget(_label(hint, "muted", True))
         if not items:
@@ -297,15 +379,14 @@ class FollowsPage(QWidget):
         ctl = self.win.follows
         acc = self.win.current.account.id
         if not batch:
-            v.addWidget(_label("Nenhum lote. Selecione perfis nas outras abas e clique em \"Deixar de seguir\".", "muted", True))
+            v.addWidget(_label("Nenhum lote. Marque perfis nas outras abas e use a barra de baixo.", "muted", True))
             return
         running = ctl.running_unfollow(acc)
-        items = batch["items"]
-        pend = [p for p in items if st.batch_status(batch, p) == "pendente" and p in st.following]
         line = QHBoxLayout()
         self.batch_info = _label("", "muted", True)
         line.addWidget(self.batch_info, 1)
         self._refresh_batch_info()
+        pend = [p for p in batch["items"] if st.batch_status(batch, p) == "pendente"]
         if not running and pend:
             b = _button("Retomar", lambda: self._run("unfollow"), "primary", "play", "white")
             b.setEnabled(self._can_act())
@@ -313,21 +394,23 @@ class FollowsPage(QWidget):
         if not running:
             line.addWidget(_button("Descartar lote", self._discard_batch, "danger", "trash", "danger"))
         v.addLayout(line)
-        order = sorted(items, key=lambda p: {"pendente": 0, "erro": 1, "removido": 2}.get(st.batch_status(batch, p), 3))
+        remove = set(batch.get("remove", []))
+        order = sorted(batch["items"], key=lambda p: {"pendente": 0, "erro": 1, "removido": 2}.get(st.batch_status(batch, p), 3))
         for pk in order[:MAX_ROWS]:
-            e = st.following.get(pk) or self._known(st, pk)
-            u = {"pk": pk, "u": e.get("u", "?"), "n": e.get("n", ""), "v": e.get("v", False), "p": e.get("p", False),
-                 "count": (st.counts.get(pk) or [None])[0], "keep": pk in st.keep}
-            v.addWidget(self._user_row(u, st, batch, in_batch_tab=True))
+            e = st.following.get(pk) or st.followers.get(pk) or self._known(st, pk)
+            u = st._row(pk, {"u": e.get("u", "?"), "n": e.get("n", ""), "v": e.get("v", False), "p": e.get("p", False),
+                             "a": e.get("a", False)})
+            sub = ("remover seguidor" if pk in remove else "deixar de seguir") + f"  ·  {_fmt_count(u['count'])} seguidores"
+            v.addWidget(self._user_row(u, st, batch, in_batch_tab=True, subtitle=sub))
 
     def _refresh_batch_info(self):
-        lbl = getattr(self, "batch_info", None)
+        lbl = self.batch_info
         cur, st, batch = self._ctx()
         if lbl is None or batch is None or self.tab != "lote":
             return
-        pend = [p for p in batch["items"] if st.batch_status(batch, p) == "pendente" and p in st.following]
+        pend = [p for p in batch["items"] if st.batch_status(batch, p) == "pendente"]
         try:
-            lbl.setText(f"{len(batch['done'])} removidos, {len(pend)} na fila, {len(batch['errors'])} com erro. "
+            lbl.setText(f"{len(batch['done'])} feitos, {len(pend)} na fila, {len(batch['errors'])} com erro. "
                         f"Fila restante: {estimate(len(pend), self.win.follows.limits())}.")
         except RuntimeError:
             self.batch_info = None
@@ -341,7 +424,8 @@ class FollowsPage(QWidget):
 
     def _unfollowers_tab(self, v, st, batch):
         v.addWidget(_label("Lista permanente: cada checagem compara com a anterior e registra quem saiu. "
-                           "Nada aqui é apagado pelo app.", "muted", True))
+                           "Nada aqui é apagado pelo app. Quem você ainda segue pode ser marcado para deixar de seguir.",
+                           "muted", True))
         items = sorted(st.unfollowers, key=lambda e: -e["lost_at"])
         if not items:
             v.addWidget(_label("Ninguém deixou de seguir desde a primeira checagem.", "muted"))
@@ -354,9 +438,80 @@ class FollowsPage(QWidget):
                 txt += f"  ·  voltou em {_when(e['back_at'])}"
             if follow_now:
                 txt += "  ·  você ainda segue"
-            u = {"pk": e["pk"], "u": e["u"], "n": e["n"], "v": False, "p": False, "count": None,
-                 "keep": e["pk"] in st.keep}
+            u = st._row(e["pk"], {"u": e["u"], "n": e["n"], "v": False, "p": False, "a": False})
             v.addWidget(self._user_row(u, st, batch, subtitle=txt, selectable=follow_now and not e["back_at"]))
+
+    def _history_tab(self, v, st):
+        v.addWidget(_label("Seguidores e seguindo em cada checagem (a checagem diária alimenta o gráfico).", "muted", True))
+        v.addWidget(HistoryChart(st.history))
+        prev = None
+        rows = []
+        for ts, fol, fing in st.history:
+            d = "" if prev is None else f"  ({fol - prev[0]:+d} seguidores, {fing - prev[1]:+d} seguindo)"
+            rows.append(f"{_when(ts)}: {fol} seguidores, {fing} seguindo{d}")
+            prev = (fol, fing)
+        for text in reversed(rows[-200:]):
+            row, h = self._row_frame()
+            h.addWidget(_label(text), 1)
+            v.addWidget(row)
+
+    def _meta_tab(self, v, st):
+        v.addWidget(_label(
+            "Use a exportação oficial do Instagram (Central de Contas > Suas informações e permissões > Baixar suas "
+            "informações > Seguidores e seguindo, formato HTML ou JSON). Escolha a pasta ou o .zip: o app lê "
+            "followers_1, following e pedidos pendentes e cruza tudo na hora, sem acessar o Instagram.",
+            "muted", True))
+        line = QHBoxLayout()
+        line.addWidget(_button("Importar .zip", lambda: self._import_meta(False), "primary", "folder", "white"))
+        line.addWidget(_button("Importar pasta", lambda: self._import_meta(True), "", "folder"))
+        line.addStretch()
+        v.addLayout(line)
+        meta = st.load_meta()
+        if not meta:
+            return
+        an = follows.meta_analysis(meta)
+        prev = st.load_meta(prev=True)
+        v.addWidget(_label(f"Exportação importada em {_when(meta['at'])}: {len(meta['followers'])} seguidores, "
+                           f"{len(meta['following'])} seguindo, {len(an['nao-seguidores'])} não seguem de volta, "
+                           f"{len(an['mutuos'])} mútuos, {len(an['fas'])} fãs, {len(an['pendentes'])} pedidos pendentes.",
+                           "rowTitle", True))
+        views = [("nao-seguidores", "Não seguidores"), ("mutuos", "Mútuos"), ("fas", "Fãs"), ("pendentes", "Pedidos pendentes"),
+                 ("deixei-de-seguir", "Você deixou de seguir")]
+        if prev:
+            views.append(("diferenca", "Diferença"))
+        seg = ui.Segmented(views, self.meta_view)
+        seg.changed.connect(lambda k: (setattr(self, "meta_view", k), self.render()))
+        v.addWidget(seg, 0, Qt.AlignmentFlag.AlignLeft)
+        if self.meta_view == "diferenca" and prev:
+            d = follows.meta_diff(prev, meta)
+            v.addWidget(_label(f"Comparando com a exportação de {_when(prev['at'])}.", "muted"))
+            for key, title in (("sairam", "Deixaram de seguir"), ("entraram", "Novos seguidores"),
+                               ("comecei", "Você passou a seguir"), ("parei", "Você deixou de seguir"),
+                               ("novos-mutuos", "Novos mútuos")):
+                v.addWidget(_label(f"{title.upper()} ({len(d[key])})", "sectionTitle"))
+                for name in d[key][:500]:
+                    v.addWidget(self._name_row(name))
+            return
+        names = an.get(self.meta_view, [])
+        if self.meta_view == "nao-seguidores" and names:
+            live = st.pks_by_username(names)
+            b = _button(f"Marcar no lote os {len(live)} que ainda constam na última checagem",
+                        lambda: self._select_from_meta(live), "", "check")
+            b.setEnabled(bool(live))
+            v.addWidget(b, 0, Qt.AlignmentFlag.AlignLeft)
+        if self.meta_view == "pendentes" and names:
+            v.addWidget(_label("Pedidos que você mandou e ninguém aceitou. Abra o perfil e toque em \"Solicitado\" "
+                               "para cancelar.", "muted", True))
+        for name in names[:MAX_ROWS]:
+            v.addWidget(self._name_row(name))
+
+    def _name_row(self, name: str) -> QFrame:
+        row, h = self._row_frame()
+        h.addWidget(_label(f"@{name}", "rowTitle"), 1)
+        h.addWidget(ui.icon_button("external", "Abrir perfil", lambda: self._open_profile(name)))
+        self.rows["meta:" + name] = {"row": row, "box": QCheckBox(), "status": QWidget(), "keep": QWidget(), "out": None,
+                                     "text": name.lower(), "flags": {}, "selectable": False}
+        return row
 
     def _audit_tab(self, v, st):
         recs = st.read_audit(500)
@@ -382,31 +537,44 @@ class FollowsPage(QWidget):
                   in_batch_tab: bool = False) -> QFrame:
         row, h = self._row_frame()
         pk = u["pk"]
+        action = self._action()
+        pool = st.followers if action == "remove" else st.following
         box = QCheckBox()
-        box.setToolTip("Selecionar para o lote (a seleção vale entre as abas)")
-        box.setChecked(pk in st.selected and self.tab != "mantidos")
+        box.setToolTip("Remover este seguidor" if action == "remove" else "Selecionar para deixar de seguir")
+        box.setChecked(pk in self._selected(st) and self.tab != "mantidos")
         box.toggled.connect(lambda on, pk=pk: self._select([pk], on))
         h.addWidget(box)
         col = QVBoxLayout()
         col.setSpacing(1)
         badge = " ✓" if u.get("v") else ""
         col.addWidget(_label(f"@{u['u']}{badge}" + (f"  ·  {u['n']}" if u.get("n") else ""), "rowTitle"))
-        sub = subtitle or (f"{_fmt_count(u['count'])} seguidores" + ("  ·  privado" if u.get("p") else ""))
-        col.addWidget(_label(sub, "muted"))
+        extra = []
+        if u.get("p"):
+            extra.append("privado")
+        if u.get("a"):
+            extra.append("sem foto")
+        if u.get("ghost_level"):
+            extra.append(f"{GHOST_TEXT[u['ghost_level']]} ({u['ghost']}): {', '.join(u['ghost_why'][:3])}")
+        first = (f"{_fmt_count(u['count'])} seguidores" if u.get("count") is not None
+                 else ("verificado" if u.get("v") else ""))
+        sub = subtitle or "  ·  ".join([x for x in [first] + extra if x]) or " "
+        sub_lbl = _label(sub, "muted")
+        col.addWidget(sub_lbl)
         h.addLayout(col, 1)
         status = _label("", "muted")
         h.addWidget(status)
         h.addWidget(ui.icon_button("external", "Abrir perfil", lambda: self._open_profile(u["u"])))
         keep = _button("Tirar de manter" if u["keep"] else "Manter", lambda: self._keep([pk], not u["keep"]))
-        keep.setToolTip("Whitelist: perfis mantidos nunca entram em lote.")
+        keep.setToolTip("Lista de manter: nunca entram em lote.")
         h.addWidget(keep)
         out = None
         if in_batch_tab:
             out = _button("Tirar do lote", lambda: self._unqueue(pk))
             h.addWidget(out)
-        r = {"row": row, "box": box, "status": status, "keep": keep, "out": out, "text": f"{u['u']} {u.get('n', '')}".lower(),
-             "selectable": (self.tab == "mantidos" and not in_batch_tab)
-                           or (selectable and pk in st.following and not u["keep"])}
+        r = {"row": row, "box": box, "status": status, "keep": keep, "out": out,
+             "text": f"{u['u']} {u.get('n', '')}".lower(),
+             "flags": {"v": bool(u.get("v")), "p": bool(u.get("p")), "a": bool(u.get("a")), "g": bool(u.get("ghost_level"))},
+             "selectable": (self.tab == "mantidos" and not in_batch_tab) or (selectable and pk in pool and not u["keep"])}
         self.rows[pk] = r
         self._paint_row(r, st.batch_status(batch, pk))
         return row
@@ -448,24 +616,31 @@ class FollowsPage(QWidget):
 
     def _update_bar(self):
         cur, st, batch = self._ctx()
-        show = cur is not None and st is not None and st.has_snapshot and self.tab in (*LIST_TABS, "deixaram")
+        show = cur is not None and st is not None and st.has_snapshot and self.tab in SELECT_TABS
         self.bar.setVisible(show)
         if not show:
             return
-        sel = [p for p in st.selected if p in st.following and p not in st.keep]
+        action = self._action()
+        pool = st.followers if action == "remove" else st.following
+        sel = [p for p in self._selected(st) if p in pool and p not in st.keep]
         lim = self.win.follows.limits()
-        famous = sum(1 for p in sel if follows.is_famous((st.counts.get(p) or [None])[0], lim.famous_threshold))
-        unknown = sum(1 for p in sel if p not in st.counts)
-        extra = f" ({famous} famosos, {unknown} sem contagem)" if sel and (famous or unknown) else ""
+        extra = ""
+        if action == "unfollow":
+            fam = sum(1 for p in sel if follows.famous(st._row(p, st.following[p]), lim.famous_threshold,
+                                                       bool(lim.famous_verified)))
+            extra = f" ({fam} famosos)" if fam else ""
         running = self.win.follows.running_unfollow(cur.account.id)
-        self.sel_label.setText(f"{len(sel)} selecionado(s){extra}" if sel else "Nenhum selecionado")
-        self.btn_none.setEnabled(bool(st.selected))
+        noun = "seguidor(es) para remover" if action == "remove" else "para deixar de seguir"
+        self.sel_label.setText(f"{len(sel)} {noun}{extra}" if sel else "Nenhum selecionado")
+        self.btn_none.setEnabled(bool(self._selected(st)))
         self.btn_keep.setVisible(self.tab != "mantidos")
         self.btn_keep.setEnabled(bool(sel))
         self.btn_unkeep.setVisible(self.tab == "mantidos")
         kept_sel = [p for p, r in self.rows.items() if r["box"].isChecked()] if self.tab == "mantidos" else []
         self.btn_unkeep.setEnabled(bool(kept_sel))
-        self.btn_go.setText(("Adicionar ao lote" if running else "Deixar de seguir") + (f" ({len(sel)})" if sel else ""))
+        verb = "Remover seguidores" if action == "remove" else "Deixar de seguir"
+        self.btn_go.setText(("Adicionar ao lote" if running else verb) + (f" ({len(sel)})" if sel else ""))
+        self.btn_go.setVisible(self.tab != "mantidos")
         self.btn_go.setEnabled(bool(sel) and cur.logged_in)
         self.btn_all.setVisible(self.tab != "mantidos")
 
@@ -474,11 +649,17 @@ class FollowsPage(QWidget):
         self.filter = text
         self._filter_timer.start()
 
+    def _flag(self, key: str, on: bool):
+        (self.flags.add if on else self.flags.discard)(key)
+        self._apply_filter()
+
     def _apply_filter(self):
         q = self.filter.strip().lstrip("@").lower()
+        flags = self.flags if self.tab in LIST_TABS else set()
         for r in self.rows.values():
             try:
-                r["row"].setVisible(not q or q in r["text"])
+                ok = (not q or q in r["text"]) and all(r["flags"].get(f) for f in flags)
+                r["row"].setVisible(ok)
             except RuntimeError:
                 pass
 
@@ -487,10 +668,8 @@ class FollowsPage(QWidget):
         cur, st, _ = self._ctx()
         if st is None:
             return
-        if self.tab == "mantidos":  # na aba Manter a caixa só serve para "Tirar de manter"
-            self._update_bar()
-            return
-        st.set_selected(pks, on)
+        if self.tab != "mantidos":  # na aba Manter a caixa só serve para "Tirar de manter"
+            st.set_selected(pks, on, self._action())
         self._update_bar()
 
     def _select_visible(self):
@@ -502,63 +681,83 @@ class FollowsPage(QWidget):
             b.blockSignals(True)
             b.setChecked(True)
             b.blockSignals(False)
-        st.set_selected(pks, True)
+        st.set_selected(pks, True, self._action())
         self._update_bar()
 
     def _clear_selection(self):
         cur, st, _ = self._ctx()
-        st.set_selected(list(st.selected), False)
+        st.set_selected(list(self._selected(st)), False, self._action())
         for r in self.rows.values():
             r["box"].blockSignals(True)
             r["box"].setChecked(False)
             r["box"].blockSignals(False)
         self._update_bar()
 
+    def _select_from_meta(self, pks: list[str]):
+        cur, st, _ = self._ctx()
+        st.set_selected(pks, True, "unfollow")
+        self.win.toast.show_message(f"{len(pks)} marcados. Confira na aba Não seguidores e use a barra de baixo.")
+        self.tab = "comuns"
+        self.render()
+
     def _keep(self, pks, keep: bool):
         cur, st, _ = self._ctx()
         st.set_keep_many(pks, keep, time.time())
+        for pk in pks:
+            st.selected_remove.discard(pk)
         self.render()
 
     def _keep_selected(self, keep: bool):
         cur, st, _ = self._ctx()
         if keep:
-            pks = [p for p in st.selected if p in st.following]
+            pool = st.followers if self._action() == "remove" else st.following
+            pks = [p for p in self._selected(st) if p in pool]
         else:
             pks = [pk for pk, r in self.rows.items() if r["box"].isChecked()]
         if pks:
             n = st.set_keep_many(pks, keep, time.time())
+            for pk in pks:
+                st.selected_remove.discard(pk)
             self.win.toast.show_message(f"{n} perfil(is) {'na lista de manter' if keep else 'liberados da lista de manter'}.")
         self.render()
 
     def _queue_selected(self):
         cur, st, _ = self._ctx()
-        pks = [p for p in st.selected if p in st.following and p not in st.keep]
+        action = self._action()
+        pool = st.followers if action == "remove" else st.following
+        pks = [p for p in self._selected(st) if p in pool and p not in st.keep]
         if not pks:
             return
         lim = self.win.follows.limits()
-        famous = [p for p in pks if follows.is_famous((st.counts.get(p) or [None])[0], lim.famous_threshold)]
         running = self.win.follows.running_unfollow(cur.account.id)
-        names = ", ".join("@" + st.following[p]["u"] for p in famous[:8]) + ("..." if len(famous) > 8 else "")
-        warn = f"\n\nInclui {len(famous)} famoso(s): {names}." if famous else ""
+        warn = ""
+        if action == "unfollow":
+            famous = [p for p in pks if follows.famous(st._row(p, st.following[p]), lim.famous_threshold,
+                                                       bool(lim.famous_verified))]
+            names = ", ".join("@" + st.following[p]["u"] for p in famous[:8]) + ("..." if len(famous) > 8 else "")
+            warn = f"\n\nInclui {len(famous)} famoso(s): {names}." if famous else ""
+            what = f"Deixar de seguir {len(pks)} perfil(is)"
+        else:
+            what = f"Remover {len(pks)} seguidor(es) (eles deixam de seguir você, sem bloqueio nem aviso)"
         if not self.win.confirm(
-            "Adicionar ao lote?" if running else "Deixar de seguir?",
-            f"Deixar de seguir {len(pks)} perfil(is) com a conta \"{cur.account.name}\".{warn}\n\n"
-            f"Uma remoção por vez, {lim.unfollow_min_delay:g} a {lim.unfollow_max_delay:g} s entre elas, até "
+            "Adicionar ao lote?" if running else "Confirmar lote?",
+            f"{what} com a conta \"{cur.account.name}\".{warn}\n\n"
+            f"Uma ação por vez, {lim.unfollow_min_delay:g} a {lim.unfollow_max_delay:g} s entre elas, até "
             f"{lim.unfollow_per_hour} por hora e {min(lim.unfollow_daily, 200)} por dia: {estimate(len(pks), lim)}. "
-            "Se o Instagram pedir calma, o app pausa e segue mais devagar. O lote fica salvo e dá para tirar "
-            "perfis dele na aba Lote enquanto não foram removidos.\n\nNão dá para desfazer pelo app.",
-            "Adicionar" if running else "Deixar de seguir", danger=True,
+            "Se o Instagram pedir calma, o app pausa e segue mais devagar. Dá para tirar perfis do lote na aba Lote "
+            "enquanto não foram feitos.\n\nNão dá para desfazer pelo app.",
+            "Adicionar" if running else "Confirmar", danger=True,
         ):
             return
-        code, msg = self.win.follows.queue(cur, pks)
-        st.set_selected(pks, False)
+        code, msg = self.win.follows.queue(cur, pks, action)
+        st.set_selected(pks, False, action)
         self.win.toast.show_message(msg, 6000)
         self.render()
 
     def _unqueue(self, pk: str):
         cur = self.win.current
         if cur is not None and not self.win.follows.unqueue(cur.account.id, pk):
-            self.win.toast.show_message("Esse perfil já está sendo removido ou saiu do lote.")
+            self.win.toast.show_message("Esse perfil já está sendo processado ou saiu do lote.")
         self.render()
 
     def _can_act(self) -> bool:
@@ -577,12 +776,66 @@ class FollowsPage(QWidget):
 
     def _discard_batch(self):
         cur, st, b = self._ctx()
-        if b and not self.win.confirm("Descartar lote?", "Os perfis que ainda estão na fila não serão removidos.",
+        if b and not self.win.confirm("Descartar lote?", "Os perfis que ainda estão na fila não serão processados.",
                                       "Descartar", danger=True):
             return
         if b:
             st.audit("lote-pausa", reason="descartado", done=len(b["done"]))
         st.clear_batch()
+        self.render()
+
+    # ---------------------------------------------------------------- arquivos
+    def _out_dir(self) -> Path:
+        d = self.win.download_root / "Seguidores"
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _visible_items(self, st) -> list[dict]:
+        if self.tab == "deixaram":
+            return sorted(st.unfollowers, key=lambda e: -e["lost_at"])
+        items = self._tab_items(st).get(self.tab if self.tab in LIST_TABS else "comuns", [])
+        return [u for u in items if (r := self.rows.get(u["pk"])) is None or r["row"].isVisible()]
+
+    def _export_csv(self):
+        cur, st, batch = self._ctx()
+        items = self._visible_items(st)
+        states = {u["pk"]: st.batch_status(batch, u["pk"]) for u in items} if batch else {}
+        tab = self.tab if self.tab in SELECT_TABS else "comuns"
+        path = self._out_dir() / f"{cur.account.name}-{tab}-{time.strftime('%Y%m%d-%H%M')}.csv"
+        path.write_text(follows_report.to_csv(items, states), encoding="utf-8")
+        self.win.toast.show_message(f"CSV salvo: {path.name} ({len(items)} linhas)", 6000, "Abrir pasta",
+                                    lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent))))
+
+    def _report(self):
+        cur, st, _ = self._ctx()
+        groups = self._tab_items(st)
+        ghosts: dict[str, int] = {}
+        for u in st.fans() + st.mutuals():
+            if u["ghost_level"]:
+                ghosts[GHOST_TEXT[u["ghost_level"]]] = ghosts.get(GHOST_TEXT[u["ghost_level"]], 0) + 1
+        html = follows_report.report_html(cur.account.name, self.win.follows.summary(cur.account.id), st.history,
+                                          groups, st.unfollowers, ghosts)
+        path = self._out_dir() / f"relatorio-{cur.account.name}-{time.strftime('%Y%m%d-%H%M')}.html"
+        path.write_text(html, encoding="utf-8")
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        self.win.toast.show_message(f"Relatório salvo em Downloads/Gramdesk/Seguidores ({path.name}).", 6000)
+
+    def _import_meta(self, folder: bool):
+        cur, st, _ = self._ctx()
+        if folder:
+            path = QFileDialog.getExistingDirectory(self, "Pasta da exportação do Instagram")
+        else:
+            path, _f = QFileDialog.getOpenFileName(self, "Exportação do Instagram (.zip)", "", "ZIP (*.zip)")
+        if not path:
+            return
+        try:
+            lists = follows.read_meta_export(Path(path))
+        except (ValueError, OSError) as exc:
+            self.win.toast.show_message(f"Não deu para ler a exportação: {exc}", 8000)
+            return
+        st.save_meta(lists, time.time())
+        self.meta_view = "nao-seguidores"
+        self.win.toast.show_message(f"Importado: {len(lists['followers'])} seguidores e {len(lists['following'])} seguindo.")
         self.render()
 
     def _open_profile(self, username: str):
