@@ -174,3 +174,28 @@ def test_unfollow_state_survives_reload(tmp_path):
     rs.record_unfollow("a1", Limits(), NOW)
     again = RateState(tmp_path / "r.json")
     assert again.unfollow_status("a1", Limits(), NOW + 10)["unfollows_today"] == 1
+
+
+def test_selection_persists_and_respects_keep(tmp_path, st):
+    snap(st, [], [u(1, "a"), u(2, "b"), u(3, "star")], NOW)
+    st.set_selected(["1", "3", "99"], True)
+    assert st.selected == {"1", "3"}
+    assert follows.FollowStore(tmp_path, "acc1").selected == {"1", "3"}
+    assert st.set_keep_many(["3", "2"], True, NOW) == 2
+    assert st.selected == {"1"} and st.keep == {"2", "3"}
+    st.set_selected(["3"], True)  # mantido não entra na seleção
+    assert st.selected == {"1"}
+    st.record_unfollowed("1", NOW)
+    assert st.selected == set()
+
+
+def test_extend_and_remove_from_batch(st):
+    snap(st, [], [u(1, "a"), u(2, "b"), u(3, "c"), u(4, "d")], NOW)
+    st.set_keep("4", True, NOW)
+    b = st.new_batch("selecao", ["1"], 10_000, NOW)
+    assert st.extend_batch(b, ["1", "2", "3", "4", "99"]) == 2
+    assert b["items"] == ["1", "2", "3"]
+    assert st.batch_status(b, "2") == "pendente" and st.batch_status(b, "4") == ""
+    assert st.remove_from_batch(b, "2") and st.load_batch()["items"] == ["1", "3"]
+    b["done"].append("1")
+    assert not st.remove_from_batch(b, "1") and st.batch_status(b, "1") == "removido"

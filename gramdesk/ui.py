@@ -236,6 +236,10 @@ QSlider::handle:horizontal {{ background: white; border: 1px solid {BORDER}; wid
 #row {{ background: {SURFACE2}; border-radius: 14px; }}
 #mono {{ font-family: monospace; font-size: 12.5px; color: {TEXT}; }}
 #kbd {{ background: {SURFACE3}; border: 1px solid {BORDER}; border-radius: 6px; padding: 3px 8px; font-family: monospace; }}
+QCheckBox::indicator {{ width: 18px; height: 18px; border-radius: 5px; border: 2px solid {MUTED}; background: transparent; }}
+QCheckBox::indicator:hover {{ border-color: {TEXT}; }}
+QCheckBox::indicator:checked {{ background: {QSS_GRAD}; border: 2px solid {TEXT}; }}
+QCheckBox::indicator:disabled {{ border-color: {BORDER}; }}
 QProgressBar {{ background: {SURFACE3}; border: none; border-radius: 4px; }}
 QProgressBar::chunk {{ background: {QSS_GRAD}; border-radius: 4px; }}
 #popover {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius: 16px; }}

@@ -29,21 +29,69 @@ KIND_LABEL = {"check": "Checagem de seguidores", "counts": "Contagem de seguidor
 class FollowsController(QObject):
     progress = pyqtSignal(str)
     changed = pyqtSignal()
+    item = pyqtSignal(str, str)  # pk, estado no lote: ativo | removido | erro | pendente | fora
 
     def __init__(self, win):
         super().__init__(win)
         self.win = win
         self.job: dict | None = None
         self.last_message = ""
+        self._stores: dict[str, follows.FollowStore] = {}
+        self._queued_start: str = ""  # conta com lote esperando a tarefa atual terminar
         self._timer = QTimer(self, singleShot=True, timeout=self._step)
         self._daily = QTimer(self, interval=30 * 60 * 1000, timeout=self._daily_tick)
         self._daily.start()
         QTimer.singleShot(120_000, self._daily_tick)
 
     # ---------------------------------------------------------------- consultas
-    @staticmethod
-    def store(acc_id: str) -> follows.FollowStore:
-        return follows.FollowStore(config.DATA_DIR / "follows", acc_id)
+    def store(self, acc_id: str) -> follows.FollowStore:
+        """Mesma instância para a tela e para a tarefa em andamento (estado sempre coerente)."""
+        st = self._stores.get(acc_id)
+        if st is None:
+            st = self._stores[acc_id] = follows.FollowStore(config.DATA_DIR / "follows", acc_id)
+        return st
+
+    def batch(self, acc_id: str) -> dict | None:
+        job = self.job
+        if job is not None and job["kind"] == "unfollow" and job["acc"] == acc_id:
+            return job["batch"]
+        return self.store(acc_id).load_batch()
+
+    def running_unfollow(self, acc_id: str) -> bool:
+        return self.job is not None and self.job["kind"] == "unfollow" and self.job["acc"] == acc_id
+
+    def queue(self, s, pks: list[str]) -> tuple[int, str]:
+        """Põe perfis no lote: entra no lote em andamento, no lote salvo ou cria um novo, e inicia se der."""
+        acc = s.account.id
+        st = self.store(acc)
+        if self.running_unfollow(acc):
+            added = st.extend_batch(self.job["batch"], pks)
+            for pk in pks:
+                self.item.emit(pk, st.batch_status(self.job["batch"], pk) or "fora")
+            return OK, f"{added} adicionado(s) ao lote em andamento."
+        batch = st.load_batch()
+        if batch is None:
+            batch = st.new_batch("selecao", list(pks), self.limits().famous_threshold, time.time())
+            added = len(batch["items"])
+        else:
+            added = st.extend_batch(batch, pks)
+        if not st.next_in_batch(batch):
+            return ERROR, "Nada para remover (mantidos e quem você já não segue ficam fora)."
+        if self.busy:
+            self._queued_start = acc
+            self.changed.emit()
+            return OK, f"{added} no lote. Começa quando a tarefa atual terminar."
+        code, msg = self.start("unfollow", s)
+        return (OK, f"{added} no lote. Deixando de seguir no ritmo seguro...") if code == OK else (code, msg)
+
+    def unqueue(self, acc_id: str, pk: str) -> bool:
+        b = self.batch(acc_id)
+        if b is None or (self.running_unfollow(acc_id) and self.job.get("pk") == pk):
+            return False
+        ok = self.store(acc_id).remove_from_batch(b, pk)
+        if ok:
+            self.item.emit(pk, "fora")
+        return ok
 
     @property
     def busy(self) -> bool:
@@ -240,6 +288,7 @@ class FollowsController(QObject):
                 self._schedule(chk["wait"])
                 return
             job["pk"] = pk
+            self.item.emit(pk, "ativo")
             user = job["store"].following.get(pk, {}).get("u", "?")
             self._emit(f"Deixando de seguir @{user} ({job['done'] + 1} nesta sessão, "
                        f"{len(batch['done']) + 1} de {len(batch['items'])} no lote)...")
@@ -365,7 +414,7 @@ class FollowsController(QObject):
             st.save_batch(batch)
             job["done"] += 1
             self.win.rlog.write("seg-remocao", account=job["s"].account.name, n=job["done"])
-            self.changed.emit()
+            self.item.emit(pk, "removido")
             self._step()
             return
         if self.job is None:
@@ -374,6 +423,7 @@ class FollowsController(QObject):
         self.win.rate.record_unfollow(job["acc"], self.limits())
         batch["errors"][pk] = str(res.get("error", "erro"))[:160]
         st.save_batch(batch)
+        self.item.emit(pk, "erro")
         if job["errors"] >= MAX_CONSECUTIVE_ERRORS:
             st.audit("lote-pausa", reason="falhas seguidas", done=job["done"])
             self._end(ERROR, "Três falhas seguidas ao deixar de seguir; lote pausado por segurança.")
@@ -433,9 +483,16 @@ class FollowsController(QObject):
         self._emit(msg)
         if not job["auto"] or code != OK:
             self.win.toast.show_message(msg, 7000)
+        if job.get("pk"):
+            self.item.emit(job["pk"], "pendente")
         self.changed.emit()
         if job["on_done"]:
             job["on_done"](code, msg)
+        acc, self._queued_start = self._queued_start, ""
+        if acc and code == OK:
+            s = self.win.sessions.get(acc)
+            if s is not None:
+                QTimer.singleShot(1500, lambda: self.start("unfollow", s))
 
     def _emit(self, msg: str):
         self.last_message = msg

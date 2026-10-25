@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gramdesk"
-version = "0.10.1"
+version = "0.11.0"
 description = "Cliente desktop leve, privado e multi-conta para o Instagram"
 readme = "README.md"
 license = "MIT"

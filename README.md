@@ -32,7 +32,9 @@ Downloads ficam em `~/Downloads/Gramdesk/<conta>/`.
 - **Checar agora**: lê a lista de seguidores e de quem você segue (páginas de 50) e compara com a checagem anterior.
 - **Não seguidores**: quem você segue e não segue de volta, abaixo do limite de famoso.
 - **Não seguidores famosos**: os que têm seguidores acima do limite (padrão 10 mil, ajustável em Preferências > Seguidores). A contagem de seguidores de cada perfil é buscada sob demanda (*Contar seguidores*) e vale 30 dias; perfis sem contagem ficam na aba *Sem contagem* e não entram em lote.
-- **Deixar de seguir em lote**: um lote por aba, com confirmação e estimativa de tempo. Perfis marcados como *Manter* nunca entram. O lote fica salvo e é retomado de onde parou.
+- **Seleção para o lote**: caixa em cada perfil, em qualquer aba (comuns, famosos, sem contagem, deixaram de seguir). A seleção vale entre as abas e fica salva. A barra de baixo mostra quantos (e quantos famosos) estão marcados, com *Selecionar visíveis*, *Limpar seleção*, *Manter* e *Deixar de seguir*. O filtro age na hora.
+- **Manter (whitelist)**: aba própria; perfis mantidos nunca entram em lote, nem se estiverem selecionados.
+- **Lote ao vivo**: aba *Lote* com cada perfil como *Na fila*, *Removendo agora*, *Removido* ou *Erro*, atualizando sozinho. Dá para acrescentar perfis com o lote rodando (*Adicionar ao lote*), tirar quem ainda não foi removido, pausar, retomar e descartar. O lote fica salvo e é retomado de onde parou.
 - **Deixaram de seguir**: lista permanente. Cada checagem registra quem saiu (e quando voltou, se voltar). O app nunca apaga essa lista.
 - **Auditoria**: tudo que aconteceu (checagens, quem saiu, quem você removeu, lotes, bloqueios), em `audit.jsonl`.
 - **Checagem diária**: com o app aberto, refaz a checagem uma vez por dia nas contas logadas que já tiveram uma checagem manual (desligável nas Preferências). Para agendar fora do app:

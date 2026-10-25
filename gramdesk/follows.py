@@ -21,7 +21,7 @@ PK_RE = re.compile(r"^\d{1,25}$")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._]{1,30}$")
 CURSOR_RE = re.compile(r"^[A-Za-z0-9_=|:.-]{0,300}$")
 KINDS = ("followers", "following")
-MODES = ("nao-seguidores", "famosos")
+MODES = ("nao-seguidores", "famosos", "selecao")
 MAX_USERS = 50_000
 COUNT_MAX_AGE = 30 * 86400  # contagem de seguidores de um perfil vale 30 dias
 AUDIT_MAX_BYTES = 2 * 1024 * 1024
@@ -120,6 +120,8 @@ class FollowStore:
             if PK_RE.match(str(pk)) and isinstance(c, list) and len(c) == 2:
                 self.counts[str(pk)] = [max(0, int(_num(c[0]))), _num(c[1])]
         self.keep = {str(p) for p in (raw.get("keep") if isinstance(raw.get("keep"), list) else []) if PK_RE.match(str(p))}
+        self.selected = {str(p) for p in (raw.get("selected") if isinstance(raw.get("selected"), list) else [])
+                         if PK_RE.match(str(p))}
         self.partial = self._parse_partial(raw.get("partial"))
         unf = _read(self.unf_path)
         self.unfollowers = [self._parse_unf(e) for e in (unf if isinstance(unf, list) else [])]
@@ -150,6 +152,7 @@ class FollowStore:
         _atomic_write(self.state_path, {
             "version": 1, "followers": self.followers, "following": self.following, "taken_at": self.taken_at,
             "checks": self.checks, "counts": self.counts, "keep": sorted(self.keep), "partial": self.partial,
+            "selected": sorted(self.selected & set(self.following)),
         })
 
     def _save_unf(self) -> None:
@@ -275,9 +278,37 @@ class FollowStore:
             self.audit("desmarcar-manter", now, pk=pk, user=user)
         self.save()
 
+    def set_keep_many(self, pks, keep: bool, now: float) -> int:
+        """Marca/desmarca vários como "manter" (whitelist). Mantidos saem da seleção. Devolve quantos mudaram."""
+        n = 0
+        for pk in pks:
+            if not PK_RE.match(str(pk)) or (pk in self.keep) == keep:
+                continue
+            user = (self.following.get(pk) or {}).get("u", "")
+            if keep:
+                self.keep.add(pk)
+                self.selected.discard(pk)
+            else:
+                self.keep.discard(pk)
+            self.audit("manter" if keep else "desmarcar-manter", now, pk=pk, user=user)
+            n += 1
+        if n:
+            self.save()
+        return n
+
+    def set_selected(self, pks, on: bool) -> None:
+        """Seleção para o lote (fica salva entre abas e sessões). Mantidos e quem já não é seguido ficam fora."""
+        for pk in pks:
+            if on and pk in self.following and pk not in self.keep:
+                self.selected.add(pk)
+            elif not on:
+                self.selected.discard(pk)
+        self.save()
+
     def record_unfollowed(self, pk: str, now: float, mode: str = "") -> None:
         """Remoção feita pelo app: tira da lista de seguindo e registra na auditoria."""
         e = self.following.pop(pk, None)
+        self.selected.discard(pk)
         for u in self.unfollowers:
             if u["pk"] == pk:
                 u["i_follow"] = False
@@ -306,6 +337,42 @@ class FollowStore:
         _atomic_write(self.batch_path, batch)
         self.audit("lote-inicio", now, mode=mode, total=len(batch["items"]), threshold=threshold)
         return batch
+
+    def extend_batch(self, batch: dict, pks) -> int:
+        """Acrescenta ao lote quem ainda é seguido, não está em "manter" nem já no lote. Devolve quantos entraram."""
+        have = set(batch["items"])
+        added = 0
+        for pk in dict.fromkeys(pks):
+            if PK_RE.match(str(pk)) and pk in self.following and pk not in self.keep and pk not in have:
+                if len(batch["items"]) >= 5000:
+                    break
+                batch["items"].append(pk)
+                batch["errors"].pop(pk, None)
+                have.add(pk)
+                added += 1
+        if added:
+            self.save_batch(batch)
+            self.audit("lote-inicio", mode="selecao", total=added)
+        return added
+
+    def remove_from_batch(self, batch: dict, pk: str) -> bool:
+        if pk in batch["items"] and pk not in batch["done"]:
+            batch["items"].remove(pk)
+            batch["errors"].pop(pk, None)
+            self.save_batch(batch)
+            return True
+        return False
+
+    @staticmethod
+    def batch_status(batch: dict | None, pk: str) -> str:
+        """'' (fora), 'pendente', 'removido' ou 'erro'."""
+        if not batch or pk not in batch["items"]:
+            return ""
+        if pk in batch["done"]:
+            return "removido"
+        if pk in batch["errors"]:
+            return "erro"
+        return "pendente"
 
     def save_batch(self, batch: dict) -> None:
         _atomic_write(self.batch_path, batch)
