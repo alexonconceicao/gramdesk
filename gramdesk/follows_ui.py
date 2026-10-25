@@ -397,6 +397,11 @@ class FollowsPage(QWidget):
             b = _button("Retomar", lambda: self._run("unfollow"), "primary", "play", "white")
             b.setEnabled(self._can_act())
             line.addWidget(b)
+        if batch["errors"]:
+            again = _button(f"Tentar de novo ({len(batch['errors'])})", self._retry_errors, "", "refresh")
+            again.setToolTip("Devolve à fila os perfis que deram erro.")
+            again.setEnabled(self._can_act() or running)
+            line.addWidget(again)
         if not running:
             line.addWidget(_button("Descartar lote", self._discard_batch, "danger", "trash", "danger"))
         v.addLayout(line)
@@ -758,6 +763,12 @@ class FollowsPage(QWidget):
             return
         code, msg = self.win.follows.queue(cur, pks, action)
         st.set_selected(pks, False, action)
+        self.win.toast.show_message(msg, 6000)
+        self.render()
+
+    def _retry_errors(self):
+        cur, _st, _b = self._ctx()
+        code, msg = self.win.follows.retry_errors(cur)
         self.win.toast.show_message(msg, 6000)
         self.render()
 

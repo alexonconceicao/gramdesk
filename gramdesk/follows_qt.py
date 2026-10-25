@@ -89,6 +89,27 @@ class FollowsController(QObject):
         code, msg = self.start("unfollow", s)
         return (OK, f"{added} no lote. {verb} no ritmo seguro...") if code == OK else (code, msg)
 
+    def retry_errors(self, s) -> tuple[int, str]:
+        """Põe de volta na fila os perfis que deram erro; começa (ou continua) o lote."""
+        acc = s.account.id
+        st = self.store(acc)
+        batch = self.batch(acc)
+        if batch is None:
+            return ERROR, "Nenhum lote salvo."
+        n = st.retry_errors(batch)
+        for pk in batch["items"]:
+            self.item.emit(pk, st.batch_status(batch, pk) or "fora")
+        if not n:
+            return ERROR, "Nada para tentar de novo."
+        if self.running_unfollow(acc):
+            return OK, f"{n} de volta na fila do lote em andamento."
+        if self.busy:
+            self._queued_start = acc
+            self.changed.emit()
+            return OK, f"{n} de volta na fila. Começa quando a tarefa atual terminar."
+        code, msg = self.start("unfollow", s)
+        return (OK, f"{n} de volta na fila...") if code == OK else (code, msg)
+
     def unqueue(self, acc_id: str, pk: str) -> bool:
         b = self.batch(acc_id)
         if b is None or (self.running_unfollow(acc_id) and self.job.get("pk") == pk):

@@ -265,3 +265,15 @@ def test_batch_with_only_remove_items_runs(st):
     assert b["remove"] == ["1"] and st.next_in_batch(b) == "1"
     assert st.extend_batch(b, ["1"], action="remove") == 0  # não duplica
     assert st.extend_batch(b, ["9"], action="remove") == 0  # não é seguidor
+
+
+def test_retry_errors_puts_them_back(st):
+    snap(st, [u(1, "fan")], [u(2, "a"), u(3, "b")], NOW)
+    b = st.new_batch("selecao", ["2", "3"], 10_000, NOW)
+    st.extend_batch(b, ["1"], action="remove")
+    b["errors"] = {"2": "falhou", "3": "falhou", "1": "falhou"}
+    st.record_unfollowed("3", NOW)  # deixou de ser seguido por fora: não volta
+    assert st.retry_errors(b) == 2
+    assert set(b["errors"]) == {"3"} and st.next_in_batch(b) == "2"  # ordem do lote
+    assert set(st.load_batch()["errors"]) == {"3"}
+    assert st.retry_errors(b) == 0

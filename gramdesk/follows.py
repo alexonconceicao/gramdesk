@@ -545,6 +545,17 @@ class FollowStore:
             self.audit("lote-inicio", mode="selecao", total=added)
         return added
 
+    def retry_errors(self, batch: dict) -> int:
+        """Devolve à fila os que deram erro e ainda fazem sentido (ainda seguidos / ainda seguidores)."""
+        remove = set(batch.get("remove", []))
+        back = [pk for pk in list(batch["errors"])
+                if pk in (self.followers if pk in remove else self.following) and pk not in self.keep]
+        for pk in back:
+            batch["errors"].pop(pk, None)
+        if back:
+            self.save_batch(batch)
+        return len(back)
+
     def remove_from_batch(self, batch: dict, pk: str) -> bool:
         if pk in batch["items"] and pk not in batch["done"]:
             batch["items"].remove(pk)
