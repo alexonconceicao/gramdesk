@@ -280,6 +280,7 @@ def test_retry_errors_puts_them_back(st):
 
 
 def test_countdown_format():
+    pytest.importorskip("PyQt6.QtCore")
     from gramdesk.follows_qt import FollowsController as C
 
     assert C.countdown(0) == "0:00" and C.countdown(5.6) == "0:06" and C.countdown(59) == "0:59"
