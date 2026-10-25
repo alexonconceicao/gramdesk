@@ -480,7 +480,33 @@ class AccountSession(QObject):
             QWebEngineScript.ScriptWorldId.MainWorld,
         )
 
-    _FOLLOW_OPS = ("me", "followers", "following", "profile", "unfollow", "remove_follower")
+    _FOLLOW_OPS = ("me", "followers", "following", "profile", "unfollow", "remove_follower",
+                   "ui_unfollow", "ui_remove_follower")
+
+    def open_for_action(self, url: str, cb, settle_ms: int = 2500, timeout_s: float = 45.0):
+        """Abre um endereço do Instagram na página da conta e avisa quando terminou de carregar."""
+        if self.page is None:
+            cb(False)
+            return
+        page = self.page
+        state = {"done": False}
+
+        def finish(ok: bool):
+            if state["done"]:
+                return
+            state["done"] = True
+            try:
+                page.loadFinished.disconnect(on_load)
+            except (TypeError, RuntimeError):
+                pass
+            QTimer.singleShot(settle_ms if ok else 0, lambda: cb(ok))
+
+        def on_load(ok: bool):
+            finish(bool(ok))
+
+        page.loadFinished.connect(on_load)
+        QTimer.singleShot(int(timeout_s * 1000), lambda: finish(False))
+        self.navigate(QUrl(url))
 
     def follow_call(self, page: GuardedPage, op: str, arg, cb, timeout_s: float = 60.0):
         """Uma requisição de seguidores na página oculta; cb recebe {ok, data} | {ok:false, blocked|error}."""

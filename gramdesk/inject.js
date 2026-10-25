@@ -842,6 +842,94 @@
     full_name: clip(u.full_name || '', 120), is_verified: !!u.is_verified, is_private: !!u.is_private,
     anon_pic: !!u.has_anonymous_profile_picture,
   });
+  // ---------- ações pela interface do próprio site ----------
+  // Em vez de falar com a API, o app clica no mesmo botão que a pessoa clicaria. Não depende de
+  // endereço interno nem de token: se o site muda o endereço da ação, isto continua valendo.
+  const UI_TEXT = {
+    following: ['seguindo', 'following', 'siguiendo', 'solicitado', 'requested', 'amigos', 'close friends'],
+    unfollow: ['deixar de seguir', 'unfollow', 'dejar de seguir', 'cancelar solicitação', 'cancelar solicitacao',
+               'cancel request', 'cancelar solicitud'],
+    follow: ['seguir', 'follow', 'seguir de volta', 'follow back', 'seguir também', 'seguir tambem'],
+    options: ['opções', 'opcoes', 'options', 'mais opções', 'mais opcoes', 'more options'],
+    removeFollower: ['remover seguidor', 'remove follower', 'eliminar seguidor'],
+    confirm: ['remover', 'remove', 'eliminar', 'deixar de seguir', 'unfollow'],
+  };
+  const norm = (t) => String(t || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const shown = (el) => {
+    if (!el) return false;
+    if (typeof el.offsetParent !== 'undefined' && el.offsetParent === null) return false;
+    if (typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (r && !r.width && !r.height) return false;
+    }
+    return true;
+  };
+  // Procura o alvo pelo texto visível; pega o menor elemento clicável (o próprio botão, não o bloco em volta).
+  const pickByText = (root, words, max) => {
+    const list = [];
+    const nodes = (root || document).querySelectorAll('button, [role="button"], [role="menuitem"], a[role="link"], div[tabindex]');
+    for (const el of nodes) {
+      const t = norm(el.textContent);
+      if (!t || t.length > (max || 40) || !words.includes(t) || !shown(el)) continue;
+      list.push(el);
+    }
+    list.sort((a, b) => norm(a.textContent).length - norm(b.textContent).length);
+    return list[0] || null;
+  };
+  const waitFor = async (fn, ms) => {
+    const t0 = Date.now();
+    for (;;) {
+      let v = null;
+      try { v = fn(); } catch (_) {}
+      if (v) return v;
+      if (Date.now() - t0 > ms) return null;
+      await sleep(250);
+    }
+  };
+  const mainArea = () => document.querySelector('main') || document.body;
+  const dialog = () => {
+    const all = [...document.querySelectorAll('[role="dialog"]')].filter(shown);
+    return all[all.length - 1] || null;
+  };
+  const onProfile = (user) => norm(location.pathname).replace(/\/+$/, '') === '/' + norm(user);
+
+  const uiUnfollow = async (user) => {
+    if (!onProfile(user)) throw new Error('o perfil não está aberto na janela');
+    const main = mainArea();
+    if (!pickByText(main, UI_TEXT.following) && pickByText(main, UI_TEXT.follow)) {
+      return { ok: true, already: true };  // já não segue
+    }
+    const btn = await waitFor(() => pickByText(main, UI_TEXT.following), 8000);
+    if (!btn) throw new Error('não achei o botão de seguir nesta página');
+    btn.click();
+    const dlg = await waitFor(() => {
+      const d = dialog();
+      return d && pickByText(d, UI_TEXT.unfollow) ? d : null;
+    }, 8000);
+    const item = dlg ? pickByText(dlg, UI_TEXT.unfollow) : pickByText(document.body, UI_TEXT.unfollow);
+    if (!item) throw new Error('não achei a opção de deixar de seguir');
+    item.click();
+    const done = await waitFor(() => (pickByText(mainArea(), UI_TEXT.follow) && !pickByText(mainArea(), UI_TEXT.following)
+      ? true : null), 12000);
+    if (!done) throw new Error('o site não confirmou que deixou de seguir');
+    return { ok: true };
+  };
+
+  const uiRemoveFollower = async (user) => {
+    if (!onProfile(user)) throw new Error('o perfil não está aberto na janela');
+    const opts = await waitFor(() => pickByText(mainArea(), UI_TEXT.options)
+      || document.querySelector('[aria-label="Opções"],[aria-label="Options"],[aria-label="Mais opções"]'), 8000);
+    if (!opts) throw new Error('não achei o menu de opções do perfil');
+    opts.click();
+    const item = await waitFor(() => pickByText(dialog() || document.body, UI_TEXT.removeFollower), 8000);
+    if (!item) throw new Error('este perfil não oferece remover seguidor');
+    item.click();
+    const yes = await waitFor(() => pickByText(dialog() || document.body, UI_TEXT.confirm), 6000);
+    if (yes) yes.click();
+    await sleep(1500);
+    return { ok: true };
+  };
+
   const followOp = async (op, a) => {
     const gap = Date.now() - lastApiAt;
     if (gap < FLOOR_MS) await sleep(FLOOR_MS - gap);
@@ -868,6 +956,10 @@
       if (!u) throw new Error('perfil não encontrado');
       return { pk: String(u.id || ''), followers: num(u.edge_followed_by ? u.edge_followed_by.count : u.follower_count),
         is_verified: !!u.is_verified };
+    }
+    if (op === 'ui_unfollow' || op === 'ui_remove_follower') {
+      if (typeof a !== 'string' || !/^[A-Za-z0-9._]{1,30}$/.test(a)) throw new Error('perfil inválido');
+      return op === 'ui_unfollow' ? await uiUnfollow(a) : await uiRemoveFollower(a);
     }
     if (op === 'unfollow' || op === 'remove_follower') {
       if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
@@ -1049,7 +1141,8 @@
     },
     follow(id, op, a) {
       if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32 || researchJobs.size >= 1) return false;
-      if (!['me', 'followers', 'following', 'profile', 'unfollow', 'remove_follower'].includes(op)) return false;
+      if (!['me', 'followers', 'following', 'profile', 'unfollow', 'remove_follower',
+            'ui_unfollow', 'ui_remove_follower'].includes(op)) return false;
       results.set(id, null);
       followOp(op, a).then(
         (data) => results.set(id, { ok: true, data }),

@@ -358,10 +358,25 @@ class FollowsController(QObject):
             st = job["store"]
             user = (st.followers if remove else st.following).get(pk, {}).get("u", "?")
             job["user"] = user
+            job["remove"] = remove
             what = "Removendo o seguidor" if remove else "Deixando de seguir"
             self._emit(f"{what} @{user} ({job['done'] + 1} nesta sessão, "
                        f"{len(batch['done']) + 1} de {len(batch['items'])} no lote)...")
-            s.follow_call(job["page"], "remove_follower" if remove else "unfollow", pk, self._on_unfollow)
+            if not follows.USERNAME_RE.match(user):
+                self._on_unfollow({"ok": False, "error": "perfil sem nome de usuário na lista"})
+                return
+            # A ação é feita no botão do próprio site: abre o perfil na janela e clica como uma pessoa.
+            s.open_for_action(f"https://www.instagram.com/{user}/", self._profile_open)
+
+    def _profile_open(self, ok: bool):
+        job = self.job
+        if job is None or not job.get("pk"):
+            return
+        if not ok:
+            self._on_unfollow({"ok": False, "error": "o perfil não abriu na janela"})
+            return
+        op = "ui_remove_follower" if job.get("remove") else "ui_unfollow"
+        job["s"].follow_call(job["page"], op, job["user"], self._on_unfollow, timeout_s=90.0)
 
     # ---------------------------------------------------------------- respostas
     def _common(self, res: dict):

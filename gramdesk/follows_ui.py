@@ -371,6 +371,9 @@ class FollowsPage(QWidget):
             "mantidos": "Lista de manter: nunca entram em lote. Marque e use \"Tirar de manter\" para liberar.",
         }[self.tab]
         v.addWidget(_label(hint, "muted", True))
+        if self.tab in ("comuns", "famosos", "mutuos", "fas"):
+            v.addWidget(_label("No lote, o app navega até cada perfil nesta janela e clica no botão do site. "
+                               "Evite navegar à mão enquanto ele roda.", "muted", True))
         if not items:
             v.addWidget(_label("Ninguém aqui.", "muted"))
         for u in items[:MAX_ROWS]:
@@ -745,7 +748,8 @@ class FollowsPage(QWidget):
         if not self.win.confirm(
             "Adicionar ao lote?" if running else "Confirmar lote?",
             f"{what} com a conta \"{cur.account.name}\".{warn}\n\n"
-            f"Uma ação por vez, {lim.unfollow_min_delay:g} a {lim.unfollow_max_delay:g} s entre elas, até "
+            "O app abre cada perfil na janela e clica no botão do próprio site, uma ação por vez, "
+            f"{lim.unfollow_min_delay:g} a {lim.unfollow_max_delay:g} s entre elas, até "
             f"{lim.unfollow_per_hour} por hora e {min(lim.unfollow_daily, 200)} por dia: {estimate(len(pks), lim)}. "
             "Se o Instagram pedir calma, o app pausa e segue mais devagar. Dá para tirar perfis do lote na aba Lote "
             "enquanto não foram feitos.\n\nNão dá para desfazer pelo app.",

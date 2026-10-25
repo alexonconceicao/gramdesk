@@ -136,3 +136,96 @@ def test_headers_come_from_the_page(tmp_path):
     assert h["X-IG-WWW-Claim"] == "hmac.AAA" and h["X-Instagram-AJAX"] == "1011" and h["X-ASBD-ID"] == "129477"
     fallback = run(tmp_path, "following", "", body=json.dumps({"users": [], "status": "ok"}), html="")
     assert fallback["calls"][0]["headers"]["X-IG-WWW-Claim"] == "0"
+
+
+UI_HARNESS = r"""
+const fs = require('fs');
+const [srcFile, inFile] = process.argv.slice(2);
+const input = JSON.parse(fs.readFileSync(inFile, 'utf8'));
+globalThis.window = globalThis;
+globalThis.fetch = async () => { throw new Error('sem rede'); };
+globalThis.XMLHttpRequest = function () {};
+XMLHttpRequest.prototype.open = function () {};
+XMLHttpRequest.prototype.send = function () {};
+globalThis.location = { pathname: input.path, href: 'https://www.instagram.com' + input.path };
+const clicked = [];
+let state = input.state;           // 'following' | 'follow'
+function el(text, opts) {
+  opts = opts || {};
+  return {
+    textContent: text, offsetParent: {}, getBoundingClientRect: () => ({ width: 90, height: 32 }),
+    click() { clicked.push(text); if (opts.sets) state = opts.sets; if (opts.opens) dialogOpen = opts.opens; },
+  };
+}
+let dialogOpen = null;
+globalThis.document = {
+  cookie: 'csrftoken=a; ds_user_id=1',
+  documentElement: { innerHTML: '' },
+  hidden: false,
+  querySelector: (sel) => (sel === 'main' ? mainNode : null),
+  querySelectorAll(sel) {
+    if (sel === '[role="dialog"]') return dialogOpen ? [dialogOpen] : [];
+    return [];
+  },
+};
+const mainNode = {
+  querySelectorAll() {
+    return state === 'following'
+      ? [el('Seguindo', { opens: dialogNode }), el('Mais opções', { opens: optionsNode })]
+      : [el('Seguir')];
+  },
+};
+const dialogNode = { querySelectorAll: () => [el('Deixar de seguir', { sets: 'follow' }), el('Cancelar')] };
+const optionsNode = { querySelectorAll: () => [el('Remover seguidor', { opens: confirmNode }), el('Denunciar')] };
+const confirmNode = { querySelectorAll: () => [el('Remover')] };
+globalThis.innerWidth = 1280; globalThis.innerHeight = 900;
+eval(fs.readFileSync(srcFile, 'utf8'));
+const b = window['__gd_test'];
+(async () => {
+  const out = { accepted: b.follow('0123456789abcdef', input.op, input.arg) };
+  for (let i = 0; i < 400 && out.accepted; i++) {
+    const r = b.take('0123456789abcdef');
+    if (r) { out.result = JSON.parse(r); break; }
+    await new Promise((ok) => setTimeout(ok, 10));
+  }
+  out.clicked = clicked;
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+def run_ui(tmp_path, op, arg, path="/thy_garcia11/", state="following"):
+    if not shutil.which("node"):
+        pytest.skip("node ausente")
+    src = resources.files("gramdesk").joinpath("inject.js").read_text(encoding="utf-8")
+    src = (src.replace("__GD_KEY__", "__gd_test").replace("__GD_GHOST__", "false")
+           .replace("__GD_TOKEN__", "t" * 32).replace("__GD_BUTTONS__", "false"))
+    (tmp_path / "inject.js").write_text(src, encoding="utf-8")
+    (tmp_path / "in.json").write_text(json.dumps({"op": op, "arg": arg, "path": path, "state": state}), encoding="utf-8")
+    (tmp_path / "ui.js").write_text(UI_HARNESS, encoding="utf-8")
+    r = subprocess.run(["node", str(tmp_path / "ui.js"), str(tmp_path / "inject.js"), str(tmp_path / "in.json")],
+                       capture_output=True, text=True, timeout=60, check=True)
+    return json.loads(r.stdout)
+
+
+def test_ui_unfollow_clicks_button_and_dialog(tmp_path):
+    out = run_ui(tmp_path, "ui_unfollow", "thy_garcia11")
+    assert out["clicked"] == ["Seguindo", "Deixar de seguir"]
+    assert out["result"] == {"ok": True, "data": {"ok": True}}
+
+
+def test_ui_unfollow_when_already_not_following(tmp_path):
+    out = run_ui(tmp_path, "ui_unfollow", "thy_garcia11", state="follow")
+    assert out["clicked"] == [] and out["result"]["data"]["already"] is True
+
+
+def test_ui_action_requires_the_profile_open(tmp_path):
+    out = run_ui(tmp_path, "ui_unfollow", "thy_garcia11", path="/outro/")
+    assert out["result"]["ok"] is False and "não está aberto" in out["result"]["error"]
+    assert run_ui(tmp_path, "ui_unfollow", "não-vale")["result"]["error"] == "perfil inválido"
+
+
+def test_ui_remove_follower_uses_options_menu(tmp_path):
+    out = run_ui(tmp_path, "ui_remove_follower", "thy_garcia11")
+    assert out["clicked"] == ["Mais opções", "Remover seguidor", "Remover"]
+    assert out["result"]["ok"] is True
