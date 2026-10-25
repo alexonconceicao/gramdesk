@@ -388,6 +388,11 @@ class FollowsController(QObject):
             if kind:
                 self._blocked(kind, status)
                 return False
+            if blk.get("html"):
+                # O endereço usado não devolve mais dados (o Instagram mudou o endpoint da ação).
+                self._end(ERROR, "O Instagram respondeu com a página em vez de confirmar a ação. Recarregue a conta "
+                                 "(Ctrl+R) e tente de novo; se continuar, o endereço da ação mudou no site.")
+                return False
             if job["kind"] == "unfollow":
                 # Recusa só deste perfil (o Instagram responde 200 com falha): registra e segue para o próximo.
                 job["errors"] += 1

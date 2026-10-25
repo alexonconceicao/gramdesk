@@ -595,9 +595,12 @@
     const failMsg = j && typeof j === 'object' && (j.status === 'fail' || j.require_login || j.checkpoint_url || j.spam)
       ? clip(String(j.message || (j.require_login ? 'login_required' : (j.checkpoint_url ? 'checkpoint_required' : 'fail'))), 300) : '';
     const finalUrl = r.redirected ? String(r.url || '').split('?')[0] : '';
+    const isHtml = !j && /<(!doctype|html)/i.test(text.slice(0, 600));
     if (r.status === 429 || r.status === 401 || r.status === 403 || BAD_URL.test(finalUrl) || failMsg ||
-        (!j && (BAD_TEXT.test(text.slice(0, 6000)) || /<html/i.test(text.slice(0, 600))))) {
-      throw new Blocked({ status: r.status, url: clip(finalUrl, 200), text: failMsg || clip(text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '), 400) });
+        (!j && (BAD_TEXT.test(text.slice(0, 6000)) || isHtml))) {
+      const detail = failMsg || (isHtml ? 'o site respondeu com a página em vez dos dados'
+        : clip(text.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' '), 400));
+      throw new Blocked({ status: r.status, url: clip(finalUrl, 200), text: detail, html: isHtml });
     }
     if (!r.ok) throw new Error('HTTP ' + r.status);
     if (!j) throw new Error('resposta inválida');
@@ -850,7 +853,7 @@
       if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
       const csrf = cookie('csrftoken');
       if (!csrf) throw new Error('sem sessão');
-      const j = await apiJson('/api/v1/friendships/destroy/' + a + '/', {
+      const j = await apiJson('/api/v1/web/friendships/' + a + '/unfollow/', {
         method: 'POST',
         headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
           'Content-Type': 'application/x-www-form-urlencoded' },
@@ -864,7 +867,7 @@
       if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
       const csrf = cookie('csrftoken');
       if (!csrf) throw new Error('sem sessão');
-      const j = await apiJson('/api/v1/friendships/remove_follower/' + a + '/', {
+      const j = await apiJson('/api/v1/web/friendships/' + a + '/remove_follower/', {
         method: 'POST',
         headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
           'Content-Type': 'application/x-www-form-urlencoded' },

@@ -74,7 +74,7 @@ def test_followers_page(tmp_path):
 def test_unfollow_posts_with_csrf_and_checks_result(tmp_path):
     out = run(tmp_path, "unfollow", "777", body=json.dumps({"friendship_status": {"following": False}, "status": "ok"}))
     c = out["calls"][0]
-    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/destroy/777/"
+    assert c["method"] == "POST" and c["url"] == "/api/v1/web/friendships/777/unfollow/"
     assert c["headers"]["X-CSRFToken"] == "abc123" and "user_id=777" in c["body"]
     assert out["result"] == {"ok": True, "data": {"ok": True}}
 
@@ -99,7 +99,7 @@ def test_invalid_args_and_no_session_never_hit_network(tmp_path):
 def test_remove_follower_checks_followed_by(tmp_path):
     out = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": False}, "status": "ok"}))
     c = out["calls"][0]
-    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/remove_follower/55/"
+    assert c["method"] == "POST" and c["url"] == "/api/v1/web/friendships/55/remove_follower/"
     assert out["result"] == {"ok": True, "data": {"ok": True}}
     bad = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": True}, "status": "ok"}))
     assert bad["result"]["ok"] is False
@@ -109,3 +109,11 @@ def test_unfollow_fail_body_is_reported_as_block_with_status(tmp_path):
     """200 com status fail: o JS devolve 'blocked' com a mensagem, para o app registrar o motivo."""
     out = run(tmp_path, "unfollow", "777", body=json.dumps({"status": "fail", "message": "Something went wrong"}))
     assert out["result"]["blocked"]["status"] == 200 and "Something" in out["result"]["blocked"]["text"]
+
+
+def test_html_response_is_flagged_not_dumped(tmp_path):
+    """Página HTML no lugar do JSON: motivo curto e marca html, sem despejar o CSS do site."""
+    page = "<!DOCTYPE html><html><style>:root{--fds-black:#000}</style><body>x</body></html>"
+    out = run(tmp_path, "unfollow", "777", body=page)
+    blk = out["result"]["blocked"]
+    assert blk["html"] is True and blk["text"] == "o site respondeu com a página em vez dos dados"
