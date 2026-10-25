@@ -103,3 +103,9 @@ def test_remove_follower_checks_followed_by(tmp_path):
     assert out["result"] == {"ok": True, "data": {"ok": True}}
     bad = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": True}, "status": "ok"}))
     assert bad["result"]["ok"] is False
+
+
+def test_unfollow_fail_body_is_reported_as_block_with_status(tmp_path):
+    """200 com status fail: o JS devolve 'blocked' com a mensagem, para o app registrar o motivo."""
+    out = run(tmp_path, "unfollow", "777", body=json.dumps({"status": "fail", "message": "Something went wrong"}))
+    assert out["result"]["blocked"]["status"] == 200 and "Something" in out["result"]["blocked"]["text"]

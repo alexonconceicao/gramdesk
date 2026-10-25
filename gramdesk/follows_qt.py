@@ -193,7 +193,7 @@ class FollowsController(QObject):
             job["mode"] = batch["mode"]
         self.job = job
         self.win.rlog.write("seg-inicio", account=s.account.name, kind=kind, auto=auto)
-        job["page"] = s.worker_page(lambda *_a: None, self._page_ready)
+        self._open_page()
         self._emit(f"{KIND_LABEL[kind]}: abrindo sessão...")
         self.changed.emit()
         return OK, ""
@@ -237,18 +237,32 @@ class FollowsController(QObject):
             self._end(ERROR, f"Não deu para preparar a sessão de trabalho ({why}). "
                              "Recarregue a conta no app (Ctrl+R) e tente de novo.")
             return
-        if job["page"] is not None:
-            job["s"].release_worker_page(job["page"])
-        job["page"] = None
+        self._drop_page(job)
         job["ready"] = False
         self._emit(f"Preparando a sessão de trabalho (tentativa {job['tries'] + 1})...")
         QTimer.singleShot(2000, self._open_page)
 
     def _open_page(self):
+        """Lote: usa a página da própria conta (contexto real do site). Leitura: página oculta separada.
+        Se a ponte da página da conta não responder, cai para a página oculta."""
         job = self.job
         if job is None:
             return
+        page = job["s"].page if job["kind"] == "unfollow" and job["tries"] == 0 else None
+        if page is not None:
+            job["page"] = page
+            job["own_page"] = False
+            QTimer.singleShot(0, lambda: self._page_ready(True))
+            return
+        job["own_page"] = True
         job["page"] = job["s"].worker_page(lambda *_a: None, self._page_ready)
+
+    @staticmethod
+    def _drop_page(job: dict) -> None:
+        """Fecha só a página oculta criada pela tarefa; a página da conta continua viva."""
+        if job.get("page") is not None and job.get("own_page", True):
+            job["s"].release_worker_page(job["page"])
+        job["page"] = None
 
     def cancel(self):
         if self.job is None:
@@ -343,6 +357,7 @@ class FollowsController(QObject):
             remove = pk in batch.get("remove", [])
             st = job["store"]
             user = (st.followers if remove else st.following).get(pk, {}).get("u", "?")
+            job["user"] = user
             what = "Removendo o seguidor" if remove else "Deixando de seguir"
             self._emit(f"{what} @{user} ({job['done'] + 1} nesta sessão, "
                        f"{len(batch['done']) + 1} de {len(batch['items'])} no lote)...")
@@ -364,16 +379,22 @@ class FollowsController(QObject):
                 status = int(blk.get("status") or 0)
             except (TypeError, ValueError):
                 status = 0
-            kind = ratelimit.classify_block(status, str(blk.get("url") or ""), str(blk.get("text") or ""))
             text = str(blk.get("text") or "")
+            kind = ratelimit.classify_block(status, str(blk.get("url") or ""), text)
             # Em remoção, "feedback_required"/"restringimos" é bloqueio de ação: nunca insistir.
             action_block = job["kind"] == "unfollow" and ACTION_BLOCK_RE.search(text)
             if kind == "rate-limit" and not action_block and self._slow_down(status):
                 return "retry"
             if kind:
                 self._blocked(kind, status)
-            else:
-                self._end(ERROR, f"Resposta inesperada do Instagram (HTTP {status}); tarefa interrompida.")
+                return False
+            if job["kind"] == "unfollow":
+                # Recusa só deste perfil (o Instagram responde 200 com falha): registra e segue para o próximo.
+                job["errors"] += 1
+                job["last_fail"] = f"HTTP {status}: {text[:120]}" if text else f"HTTP {status}"
+                job["store"].audit("acao-recusada", status=status, motivo=text[:160], user=job.get("user", ""))
+                return False
+            self._end(ERROR, f"Resposta inesperada do Instagram (HTTP {status}); tarefa interrompida.")
             return False
         job["errors"] += 1
         return False
@@ -476,7 +497,7 @@ class FollowsController(QObject):
             return
         if self.job is None:
             return
-        err = str(res.get("error", "erro"))[:160]
+        err = str(res.get("error") or job.pop("last_fail", "") or "erro")[:160]
         if "carregando" in err or "página fechada" in err or "tempo esgotado" in err:
             # A ponte da página sumiu (recarregou, app reaberto): recria e repete a mesma ação.
             job["pk"] = pk
@@ -488,8 +509,9 @@ class FollowsController(QObject):
         st.save_batch(batch)
         self.item.emit(pk, "erro")
         if job["errors"] >= MAX_CONSECUTIVE_ERRORS:
-            st.audit("lote-pausa", reason="falhas seguidas", done=job["done"])
-            self._end(ERROR, "Três falhas seguidas ao deixar de seguir; lote pausado por segurança.")
+            st.audit("lote-pausa", reason=f"falhas seguidas: {err}", done=job["done"])
+            self._end(ERROR, f"Três falhas seguidas ({err}); lote pausado por segurança. "
+                             "Abra um perfil da lista no app e confira se o botão de seguir responde.")
             return
         self._step()
 
@@ -538,8 +560,7 @@ class FollowsController(QObject):
             return
         self.job = None
         self._timer.stop()
-        if job["page"] is not None:
-            job["s"].release_worker_page(job["page"])
+        self._drop_page(job)
         self.win.rlog.write("seg-fim", account=job["s"].account.name, kind=job["kind"], code=code,
                             requests=job["requests"], done=job["done"], seconds=time.time() - job["started"],
                             reason=msg if code != OK else "")

@@ -50,6 +50,8 @@ AUDIT_TEXT = {
                               f"ritmo {r.get('slow', '?')}x mais lento, seguiu sozinho"),
     "manter": lambda r: f"@{r.get('user', '?')} entrou na lista de manter",
     "desmarcar-manter": lambda r: f"@{r.get('user', '?')} saiu da lista de manter",
+    "acao-recusada": lambda r: (f"O Instagram recusou a ação em @{r.get('user', '?')} "
+                                f"(HTTP {r.get('status', '?')}): {r.get('motivo', 'sem detalhe')}"),
     "tarefa-erro": lambda r: f"{r.get('kind', 'tarefa')} interrompida: {r.get('reason', '')}",
     "importacao-meta": lambda r: (f"Exportação da Meta importada: {r.get('followers', 0)} seguidores, "
                                   f"{r.get('following', 0)} seguindo, {r.get('pending', 0)} pedidos pendentes"),
