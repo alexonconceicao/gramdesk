@@ -480,8 +480,13 @@ class AccountSession(QObject):
             QWebEngineScript.ScriptWorldId.MainWorld,
         )
 
+    _FOLLOW_OPS = ("me", "followers", "following", "profile", "unfollow", "remove_follower")
+
     def follow_call(self, page: GuardedPage, op: str, arg, cb, timeout_s: float = 60.0):
         """Uma requisição de seguidores na página oculta; cb recebe {ok, data} | {ok:false, blocked|error}."""
+        if op not in self._FOLLOW_OPS:
+            cb({"ok": False, "error": "operação inválida"})
+            return
         req = security.new_request_id()
         key = json.dumps(self._key)
         tries = int(timeout_s / 0.3)

@@ -255,3 +255,13 @@ def test_extend_and_remove_from_batch(st):
     assert st.remove_from_batch(b, "2") and st.load_batch()["items"] == ["1", "3"]
     b["done"].append("1")
     assert not st.remove_from_batch(b, "1") and st.batch_status(b, "1") == "removido"
+
+
+def test_batch_with_only_remove_items_runs(st):
+    """Lote só de remoção de seguidor: next_in_batch olha a lista de seguidores, não a de seguindo."""
+    snap(st, [u(1, "fan")], [u(9, "z")], NOW)
+    b = st.new_batch("selecao", [], 10_000, NOW)
+    assert st.extend_batch(b, ["1"], action="remove") == 1
+    assert b["remove"] == ["1"] and st.next_in_batch(b) == "1"
+    assert st.extend_batch(b, ["1"], action="remove") == 0  # não duplica
+    assert st.extend_batch(b, ["9"], action="remove") == 0  # não é seguidor

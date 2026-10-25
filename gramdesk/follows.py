@@ -28,7 +28,7 @@ AUDIT_MAX_BYTES = 2 * 1024 * 1024
 AUDIT_EVENTS = (
     "checagem", "checagem-parcial", "deixou-de-seguir", "voltou-a-seguir", "deixei-de-seguir",
     "lote-inicio", "lote-pausa", "lote-fim", "contagem", "bloqueio", "manter", "desmarcar-manter", "desacelerar",
-    "removi-seguidor", "importacao-meta",
+    "removi-seguidor", "importacao-meta", "tarefa-erro",
 )
 HISTORY_MAX = 2000
 ACTIONS = ("unfollow", "remove")
