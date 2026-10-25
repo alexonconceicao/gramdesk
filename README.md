@@ -163,7 +163,7 @@ Na página de [Releases](https://github.com/alexonconceicao/gramdesk/releases):
 - `Gramdesk-<versão>-windows-portable.zip`: versão portátil. Descompacte e rode `Gramdesk.exe`; com o arquivo `portable.txt` presente, tudo fica na pasta `data` ao lado do executável (bom para pendrive).
 - `SHA256SUMS-windows.txt`: hashes para conferir os arquivos.
 
-O executável não é assinado digitalmente, então o Windows SmartScreen pode avisar na primeira execução ("Mais informações" > "Executar assim mesmo"). Os builds saem do GitHub Actions a partir deste código ([workflow](.github/workflows/windows.yml)), com autoteste do executável antes da publicação.
+O executável não é assinado digitalmente, então o Windows SmartScreen pode avisar na primeira execução ("Mais informações" > "Executar assim mesmo"). Os pacotes do Windows são gerados a mão (PyInstaller com `packaging/gramdesk.spec` e Inno Setup com `packaging/windows/gramdesk.iss`), a partir deste código.
 
 Limitação: o Qt WebEngine distribuído pelo PyPI (usado no build Windows) não traz os codecs H.264/AAC, então alguns vídeos do feed podem não tocar ou ficar sem som dentro do app. Downloads funcionam normalmente, e o player da galeria (Meus downloads) usa outro decodificador (QtMultimedia), que lê H.264.
 

@@ -42,8 +42,10 @@ flatpak list --app | grep -i gramdesk
 - Arquivo de dados novo (`.js`/`.svg`): adicionar em `packaging/gramdesk.spec` (`datas`), `pyproject.toml` (`package-data`) e globs do manifesto.
 - Arquivo `.py` novo em `gramdesk/` entra sozinho (glob), mas confira o spec do PyInstaller se for importado dinamicamente.
 
-## Windows (GitHub Actions)
+## Windows (manual)
 
-`.github/workflows/windows.yml`, dispara em tag `v*` ou `workflow_dispatch`: pytest > `make_version.py` > `make_build_info.py` (secrets) > `pyinstaller packaging/gramdesk.spec` > `Gramdesk.exe --selftest` offscreen > zip portátil (`portable.txt`) > Inno Setup (`packaging/windows/gramdesk.iss`, AppId fixo, **não mudar**) > `SHA256SUMS-windows.txt` > upload na release.
+Não há mais workflow do GitHub Actions (removidos em 25/10/2026 a pedido do usuário; recuperáveis com `git checkout <commit> -- .github/workflows`). Para gerar no Windows: `python packaging/windows/make_version.py` > `tools/make_build_info.py` > `pyinstaller --noconfirm packaging/gramdesk.spec` > `Gramdesk.exe --selftest` (com `QT_QPA_PLATFORM=offscreen` e `GRAMDESK_HOME` temporário) > zip portátil com `portable.txt` > `ISCC.exe /DAppVersion=X.Y.Z packaging\windows\gramdesk.iss` (AppId fixo, **não mudar**).
 
-Publicar: bump + commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. A tag precisa bater com `config.VERSION`. Perguntar ao usuário antes de criar tag ou dar push.
+**Testes só rodam local**: `python3 -m pytest -q tests` antes de cada publicação. Vários testes dependem de permissão 0600 e de UTF-8 no terminal, então pulam ou falham no Windows.
+
+Publicar: bump + commit, `git tag vX.Y.Z && git push origin vX.Y.Z`. A tag precisa bater com `config.VERSION`.
