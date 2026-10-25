@@ -229,3 +229,70 @@ def test_ui_remove_follower_uses_options_menu(tmp_path):
     out = run_ui(tmp_path, "ui_remove_follower", "thy_garcia11")
     assert out["clicked"] == ["Mais opções", "Remover seguidor", "Remover"]
     assert out["result"]["ok"] is True
+
+
+GQL_HARNESS = UI_HARNESS.replace(
+    "globalThis.fetch = async () => { throw new Error('sem rede'); };",
+    """const calls = [];
+globalThis.fetch = async (url, init) => {
+  calls.push({ url: String(url), method: (init && init.method) || 'GET', headers: (init && init.headers) || {},
+               body: String((init && init.body) || '') });
+  const r = input.responses[calls.length - 1] || input.responses[input.responses.length - 1];
+  return { status: r.status, ok: r.status < 300, redirected: false, url: String(url), text: async () => r.body };
+};""").replace("out.clicked = clicked;", "out.clicked = clicked; out.calls = calls;").replace(
+    "globalThis.document = {\n  cookie: 'csrftoken=a; ds_user_id=1',\n  documentElement: { innerHTML: '' },",
+    "globalThis.require = (n) => input.require[n];\nglobalThis.document = {\n  cookie: 'csrftoken=a; ds_user_id=42',\n"
+    "  documentElement: { innerHTML: input.html || '' },")
+
+
+def run_gql(tmp_path, arg, responses, require=None, html=""):
+    if not shutil.which("node"):
+        pytest.skip("node ausente")
+    src = resources.files("gramdesk").joinpath("inject.js").read_text(encoding="utf-8")
+    src = (src.replace("__GD_KEY__", "__gd_test").replace("__GD_GHOST__", "false")
+           .replace("__GD_TOKEN__", "t" * 32).replace("__GD_BUTTONS__", "false"))
+    (tmp_path / "inject.js").write_text(src, encoding="utf-8")
+    (tmp_path / "in.json").write_text(json.dumps({
+        "op": "gql_unfollow", "arg": arg, "path": "/", "state": "following", "responses": responses,
+        "require": {"DTSGInitialData": {"token": "DT:1"}, "LSD": {"token": "ls1"},
+                    "SiteData": {"client_revision": 777}} if require is None else require,
+        "html": html}), encoding="utf-8")
+    (tmp_path / "g.js").write_text(GQL_HARNESS, encoding="utf-8")
+    r = subprocess.run(["node", str(tmp_path / "g.js"), str(tmp_path / "inject.js"), str(tmp_path / "in.json")],
+                       capture_output=True, text=True, timeout=60, check=True)
+    return json.loads(r.stdout)
+
+
+def test_mutation_posts_signed_body(tmp_path):
+    body = json.dumps({"data": {"xdt_unfollow": {"friendship_status": {"following": False}}}})
+    out = run_gql(tmp_path, "777", [{"status": 200, "body": body}])
+    c = out["calls"][0]
+    assert c["url"] == "/api/graphql" and c["method"] == "POST"
+    assert c["headers"]["X-FB-LSD"] == "ls1" and "usePolarisUnfollow" in c["headers"]["X-FB-Friendly-Name"]
+    assert "fb_dtsg=DT%3A1" in c["body"] and "av=42" in c["body"] and "doc_id=" in c["body"]
+    assert "jazoest=2" in c["body"] and "__rev=777" in c["body"]
+    assert out["result"] == {"ok": True, "data": {"ok": True, "via": "mutacao"}}
+
+
+def test_mutation_falls_back_to_tokens_in_html(tmp_path):
+    html = '"LSD",[],{"token":"fromhtml"} "DTSGInitialData",[],{"token":"dt2"}'
+    body = json.dumps({"data": {"x": {"friendship_status": {"following": False}}}})
+    out = run_gql(tmp_path, "777", [{"status": 200, "body": body}], require={}, html=html)
+    assert out["calls"][0]["headers"]["X-FB-LSD"] == "fromhtml"
+
+
+def test_mutation_without_tokens_is_an_error_not_a_crash(tmp_path):
+    out = run_gql(tmp_path, "777", [{"status": 200, "body": "{}"}], require={}, html="")
+    assert out["calls"] == [] and "sessão" in out["result"]["error"]
+
+
+def test_mutation_checks_relationship_when_state_missing(tmp_path):
+    out = run_gql(tmp_path, "777", [{"status": 200, "body": json.dumps({"data": {"ok": 1}})},
+                                    {"status": 200, "body": json.dumps({"following": False, "status": "ok"})}])
+    assert out["calls"][1]["url"] == "/api/v1/friendships/show/777/"
+    assert out["result"]["data"]["checked"] is True
+
+
+def test_mutation_errors_are_reported(tmp_path):
+    out = run_gql(tmp_path, "777", [{"status": 200, "body": json.dumps({"errors": [{"message": "no auth"}]})}])
+    assert out["result"]["ok"] is False and "mutação" in out["result"]["error"]

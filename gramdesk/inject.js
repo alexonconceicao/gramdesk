@@ -842,6 +842,87 @@
     full_name: clip(u.full_name || '', 120), is_verified: !!u.is_verified, is_private: !!u.is_private,
     anon_pic: !!u.has_anonymous_profile_picture,
   });
+  // ---------- deixar de seguir pela mesma chamada do botão do site ----------
+  // O endereço antigo da API devolve a página HTML. O botão "Deixar de seguir" usa a mutação abaixo,
+  // assinada com os tokens que a própria página carregou. Se ela falhar, o app clica no botão (adiante).
+  const UNFOLLOW_DOC_ID = '27789106940691111';
+  const UNFOLLOW_NAME = 'usePolarisUnfollowMutation';
+  let sessTokens = null;
+  const readTokens = () => {
+    if (sessTokens) return sessTokens;
+    let dtsg = '', lsd = '', rev = '';
+    try {
+      const req = window.require;
+      if (typeof req === 'function') {
+        dtsg = (req('DTSGInitialData') || {}).token || '';
+        lsd = (req('LSD') || {}).token || '';
+        const sd = req('SiteData') || {};
+        rev = sd.client_revision ? String(sd.client_revision) : '';
+      }
+    } catch (_) {}
+    if (!dtsg || !lsd) {
+      const html = document.documentElement ? document.documentElement.innerHTML : '';
+      dtsg = dtsg || (html.match(/"DTSGInitialData",\[\],\{"token":"([^"]+)"/) || [])[1]
+        || (html.match(/"dtsg":\{"token":"([^"]+)"/) || [])[1] || '';
+      lsd = lsd || (html.match(/"LSD",\[\],\{"token":"([^"]+)"/) || [])[1] || '';
+      rev = rev || (html.match(/"client_revision":(\d+)/) || [])[1] || '';
+    }
+    sessTokens = dtsg && lsd ? { dtsg, lsd, rev } : null;
+    return sessTokens;
+  };
+  const jazoest = (t) => {
+    let sum = 0;
+    for (let i = 0; i < t.length; i++) sum += t.charCodeAt(i);
+    return '2' + sum;
+  };
+  const gqlUnfollow = async (pk) => {
+    const tok = readTokens();
+    if (!tok) throw new Error('a página ainda não carregou os dados da sessão');
+    const csrf = cookie('csrftoken');
+    const me = cookie('ds_user_id');
+    if (!csrf || !me) throw new Error('sem sessão');
+    const params = {
+      av: me, __d: 'www', __user: '0', __a: '1', __comet_req: '7',
+      fb_dtsg: tok.dtsg, jazoest: jazoest(tok.dtsg), lsd: tok.lsd,
+      fb_api_caller_class: 'RelayModern', fb_api_req_friendly_name: UNFOLLOW_NAME,
+      variables: JSON.stringify({ target_user_id: pk, container_module: 'profile' }),
+      server_timestamps: 'true', doc_id: UNFOLLOW_DOC_ID,
+    };
+    if (tok.rev) { params.__rev = tok.rev; params.__spin_r = tok.rev; }
+    const j = await apiJson('/api/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-CSRFToken': csrf,
+        'X-FB-Friendly-Name': UNFOLLOW_NAME,
+        'X-FB-LSD': tok.lsd,
+        'X-IG-App-ID': APP_ID,
+      },
+      body: new URLSearchParams(params).toString(),
+    });
+    if (!j || j.errors || j.error || !j.data) {
+      throw new Error('a mutação não foi aceita' + (j && j.errors ? ': ' + clip(JSON.stringify(j.errors), 160) : ''));
+    }
+    const fs = findFriendship(j.data);
+    if (fs && fs.following === true) throw new Error('o Instagram manteve o seguir');
+    if (fs && fs.following === false) return { ok: true, via: 'mutacao' };
+    await sleep(FLOOR_MS);
+    const shown = await apiJson('/api/v1/friendships/show/' + pk + '/', { headers: igHeaders({}) });
+    if (shown && shown.following) throw new Error('o Instagram manteve o seguir');
+    return { ok: true, via: 'mutacao', checked: true };
+  };
+  const findFriendship = (node, depth) => {
+    depth = depth || 0;
+    if (!node || typeof node !== 'object' || depth > 12) return null;
+    const fs = node.friendship_status;
+    if (fs && typeof fs === 'object') return fs;
+    for (const k of Object.keys(node)) {
+      const got = findFriendship(node[k], depth + 1);
+      if (got) return got;
+    }
+    return null;
+  };
+
   // ---------- ações pela interface do próprio site ----------
   // Em vez de falar com a API, o app clica no mesmo botão que a pessoa clicaria. Não depende de
   // endereço interno nem de token: se o site muda o endereço da ação, isto continua valendo.
@@ -956,6 +1037,10 @@
       if (!u) throw new Error('perfil não encontrado');
       return { pk: String(u.id || ''), followers: num(u.edge_followed_by ? u.edge_followed_by.count : u.follower_count),
         is_verified: !!u.is_verified };
+    }
+    if (op === 'gql_unfollow') {
+      if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
+      return await gqlUnfollow(a);
     }
     if (op === 'ui_unfollow' || op === 'ui_remove_follower') {
       if (typeof a !== 'string' || !/^[A-Za-z0-9._]{1,30}$/.test(a)) throw new Error('perfil inválido');
@@ -1142,7 +1227,7 @@
     follow(id, op, a) {
       if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32 || researchJobs.size >= 1) return false;
       if (!['me', 'followers', 'following', 'profile', 'unfollow', 'remove_follower',
-            'ui_unfollow', 'ui_remove_follower'].includes(op)) return false;
+            'gql_unfollow', 'ui_unfollow', 'ui_remove_follower'].includes(op)) return false;
       results.set(id, null);
       followOp(op, a).then(
         (data) => results.set(id, { ok: true, data }),

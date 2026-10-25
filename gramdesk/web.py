@@ -481,7 +481,7 @@ class AccountSession(QObject):
         )
 
     _FOLLOW_OPS = ("me", "followers", "following", "profile", "unfollow", "remove_follower",
-                   "ui_unfollow", "ui_remove_follower")
+                   "gql_unfollow", "ui_unfollow", "ui_remove_follower")
 
     def open_for_action(self, url: str, cb, settle_ms: int = 2500, timeout_s: float = 45.0):
         """Abre um endereço do Instagram na página da conta e avisa quando terminou de carregar."""

@@ -365,8 +365,18 @@ class FollowsController(QObject):
             if not follows.USERNAME_RE.match(user):
                 self._on_unfollow({"ok": False, "error": "perfil sem nome de usuário na lista"})
                 return
-            # A ação é feita no botão do próprio site: abre o perfil na janela e clica como uma pessoa.
-            s.open_for_action(f"https://www.instagram.com/{user}/", self._profile_open)
+            job["fallback"] = False
+            if not remove and job.get("ui_pk") != pk:
+                # Mesma chamada do botão do site, sem sair da página. Se não passar, clica no botão.
+                s.follow_call(job["page"], "gql_unfollow", pk, self._on_unfollow, timeout_s=60.0)
+                return
+            self._goto_profile()
+
+    def _goto_profile(self):
+        """Abre o perfil na janela para agir pelo botão do próprio site."""
+        job = self.job
+        job["fallback"] = True
+        job["s"].open_for_action(f"https://www.instagram.com/{job['user']}/", self._profile_open)
 
     def _profile_open(self, ok: bool):
         job = self.job
@@ -518,6 +528,15 @@ class FollowsController(QObject):
         if self.job is None:
             return
         err = str(res.get("error") or job.pop("last_fail", "") or "erro")[:160]
+        if not job.get("fallback") and not job.get("remove") and pk:
+            # A mutação não passou: tenta do jeito manual, clicando no botão do perfil.
+            job["ui_pk"] = pk
+            job["store"].audit("acao-recusada", status=0, motivo=f"mutação falhou ({err}); tentando pelo botão",
+                               user=job.get("user", ""))
+            job["pk"] = pk
+            self._emit(f"Abrindo @{job.get('user', '')} para clicar no botão...")
+            self._goto_profile()
+            return
         if "carregando" in err or "página fechada" in err or "tempo esgotado" in err:
             # A ponte da página sumiu (recarregou, app reaberto): recria e repete a mesma ação.
             job["pk"] = pk
