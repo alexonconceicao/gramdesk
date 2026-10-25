@@ -817,6 +817,26 @@
     const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
     return m ? decodeURIComponent(m[1]) : '';
   };
+  // Cabeçalhos que a própria página manda nas chamadas dela; sem eles o Instagram devolve a página HTML.
+  let webCfg = null;
+  const igHeaders = (extra) => {
+    if (!webCfg) {
+      const html = document.documentElement ? document.documentElement.innerHTML : '';
+      webCfg = {
+        claim: (html.match(/"www_claim"\s*:\s*"(hmac\.[^"]+)"/) || [])[1] || '0',
+        ajax: (html.match(/"rollout_hash"\s*:\s*"([\w.-]{1,40})"/) || [])[1] || '1',
+        asbd: (html.match(/"ASBD_ID"\s*:\s*"?(\d{1,10})"?/i) || [])[1] || '129477',
+      };
+    }
+    return Object.assign({
+      'X-IG-App-ID': APP_ID,
+      'X-Requested-With': 'XMLHttpRequest',
+      'X-ASBD-ID': webCfg.asbd,
+      'X-Instagram-AJAX': webCfg.ajax,
+      'X-IG-WWW-Claim': webCfg.claim,
+    }, extra || {});
+  };
+
   const slimUser = (u) => ({
     pk: String(u.pk || u.pk_id || u.id || ''), username: String(u.username || ''),
     full_name: clip(u.full_name || '', 120), is_verified: !!u.is_verified, is_private: !!u.is_private,
@@ -836,7 +856,7 @@
       const cur = typeof a === 'string' && /^[A-Za-z0-9_=|:.-]{1,300}$/.test(a) ? a : '';
       const q = '/api/v1/friendships/' + id + '/' + op + '/?count=50' +
         (op === 'followers' ? '&search_surface=follow_list_page' : '') + (cur ? '&max_id=' + encodeURIComponent(cur) : '');
-      const j = await apiJson(q);
+      const j = await apiJson(q, { headers: igHeaders({}) });
       const users = (j.users || []).slice(0, 200).map(slimUser);
       const next = j.next_max_id != null ? String(j.next_max_id) : '';
       return { users, cursor: next, more: !!next && users.length > 0 };
@@ -849,33 +869,26 @@
       return { pk: String(u.id || ''), followers: num(u.edge_followed_by ? u.edge_followed_by.count : u.follower_count),
         is_verified: !!u.is_verified };
     }
-    if (op === 'unfollow') {
+    if (op === 'unfollow' || op === 'remove_follower') {
       if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
       const csrf = cookie('csrftoken');
       if (!csrf) throw new Error('sem sessão');
-      const j = await apiJson('/api/v1/web/friendships/' + a + '/unfollow/', {
+      const field = op === 'unfollow' ? 'following' : 'followed_by';
+      const j = await apiJson('/api/v1/friendships/' + (op === 'unfollow' ? 'destroy' : 'remove_follower') + '/' + a + '/', {
         method: 'POST',
-        headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
-          'Content-Type': 'application/x-www-form-urlencoded' },
+        headers: igHeaders({ 'X-CSRFToken': csrf, 'Content-Type': 'application/x-www-form-urlencoded' }),
         body: 'container_module=profile&user_id=' + a,
       });
       const fs = j && j.friendship_status;
-      if (j.status !== 'ok' || (fs && fs.following)) throw new Error('o Instagram não confirmou a remoção');
-      return { ok: true };
-    }
-    if (op === 'remove_follower') {
-      if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
-      const csrf = cookie('csrftoken');
-      if (!csrf) throw new Error('sem sessão');
-      const j = await apiJson('/api/v1/web/friendships/' + a + '/remove_follower/', {
-        method: 'POST',
-        headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
-          'Content-Type': 'application/x-www-form-urlencoded' },
-        body: 'container_module=profile&user_id=' + a,
-      });
-      const fs = j && j.friendship_status;
-      if (j.status !== 'ok' || (fs && fs.followed_by)) throw new Error('o Instagram não confirmou a remoção do seguidor');
-      return { ok: true };
+      if (fs && typeof fs[field] === 'boolean') {
+        if (fs[field]) throw new Error('o Instagram não confirmou a ação');
+        return { ok: true };
+      }
+      // Resposta sem o estado: confere a relação antes de dar como feita.
+      await sleep(FLOOR_MS);
+      const shown = await apiJson('/api/v1/friendships/show/' + a + '/', { headers: igHeaders({}) });
+      if (shown && shown[field]) throw new Error('o Instagram não confirmou a ação');
+      return { ok: true, checked: true };
     }
     throw new Error('operação inválida');
   };

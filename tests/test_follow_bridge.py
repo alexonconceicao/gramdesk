@@ -25,7 +25,7 @@ XMLHttpRequest.prototype.open = function () {};
 XMLHttpRequest.prototype.send = function () {};
 globalThis.location = { pathname: '/', href: 'https://www.instagram.com/' };
 globalThis.document = { cookie: input.cookie, querySelectorAll: () => [], querySelector: () => null,
-                        documentElement: null, hidden: false };
+                        documentElement: { innerHTML: input.html || '' }, hidden: false };
 globalThis.innerWidth = 1280; globalThis.innerHeight = 900;
 eval(fs.readFileSync(srcFile, 'utf8'));
 const b = window['__gd_test'];
@@ -44,7 +44,10 @@ const b = window['__gd_test'];
 COOKIE = "csrftoken=abc123; ds_user_id=4242; mid=x"
 
 
-def run(tmp_path, op, arg, status=200, body="{}", cookie=COOKIE):
+PAGE_HTML = '{"www_claim":"hmac.AAA","rollout_hash":"1011","ASBD_ID":"129477"}'
+
+
+def run(tmp_path, op, arg, status=200, body="{}", cookie=COOKIE, html=PAGE_HTML):
     if not shutil.which("node"):
         pytest.skip("node ausente")
     src = resources.files("gramdesk").joinpath("inject.js").read_text(encoding="utf-8")
@@ -52,7 +55,7 @@ def run(tmp_path, op, arg, status=200, body="{}", cookie=COOKIE):
            .replace("__GD_TOKEN__", "t" * 32).replace("__GD_BUTTONS__", "false"))
     (tmp_path / "inject.js").write_text(src, encoding="utf-8")
     (tmp_path / "in.json").write_text(json.dumps({"op": op, "arg": arg, "cookie": cookie,
-                                                  "response": {"status": status, "body": body}}), encoding="utf-8")
+                                                  "html": html, "response": {"status": status, "body": body}}), encoding="utf-8")
     (tmp_path / "h.js").write_text(HARNESS, encoding="utf-8")
     r = subprocess.run(["node", str(tmp_path / "h.js"), str(tmp_path / "inject.js"), str(tmp_path / "in.json")],
                        capture_output=True, text=True, timeout=30, check=True)
@@ -74,7 +77,8 @@ def test_followers_page(tmp_path):
 def test_unfollow_posts_with_csrf_and_checks_result(tmp_path):
     out = run(tmp_path, "unfollow", "777", body=json.dumps({"friendship_status": {"following": False}, "status": "ok"}))
     c = out["calls"][0]
-    assert c["method"] == "POST" and c["url"] == "/api/v1/web/friendships/777/unfollow/"
+    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/destroy/777/"
+    assert c["headers"]["X-ASBD-ID"] and c["headers"]["X-Instagram-AJAX"] and c["headers"]["X-IG-WWW-Claim"]
     assert c["headers"]["X-CSRFToken"] == "abc123" and "user_id=777" in c["body"]
     assert out["result"] == {"ok": True, "data": {"ok": True}}
 
@@ -99,7 +103,7 @@ def test_invalid_args_and_no_session_never_hit_network(tmp_path):
 def test_remove_follower_checks_followed_by(tmp_path):
     out = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": False}, "status": "ok"}))
     c = out["calls"][0]
-    assert c["method"] == "POST" and c["url"] == "/api/v1/web/friendships/55/remove_follower/"
+    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/remove_follower/55/"
     assert out["result"] == {"ok": True, "data": {"ok": True}}
     bad = run(tmp_path, "remove_follower", "55", body=json.dumps({"friendship_status": {"followed_by": True}, "status": "ok"}))
     assert bad["result"]["ok"] is False
@@ -117,3 +121,18 @@ def test_html_response_is_flagged_not_dumped(tmp_path):
     out = run(tmp_path, "unfollow", "777", body=page)
     blk = out["result"]["blocked"]
     assert blk["html"] is True and blk["text"] == "o site respondeu com a página em vez dos dados"
+
+
+def test_unfollow_confirms_when_body_has_no_state(tmp_path):
+    """Resposta sem friendship_status: confere a relação antes de dar como feita."""
+    out = run(tmp_path, "unfollow", "777", body=json.dumps({"status": "ok"}))
+    assert [c["url"] for c in out["calls"]] == ["/api/v1/friendships/destroy/777/", "/api/v1/friendships/show/777/"]
+    assert out["result"]["data"]["checked"] is True
+
+
+def test_headers_come_from_the_page(tmp_path):
+    out = run(tmp_path, "following", "", body=json.dumps({"users": [], "status": "ok"}))
+    h = out["calls"][0]["headers"]
+    assert h["X-IG-WWW-Claim"] == "hmac.AAA" and h["X-Instagram-AJAX"] == "1011" and h["X-ASBD-ID"] == "129477"
+    fallback = run(tmp_path, "following", "", body=json.dumps({"users": [], "status": "ok"}), html="")
+    assert fallback["calls"][0]["headers"]["X-IG-WWW-Claim"] == "0"
