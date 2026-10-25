@@ -37,6 +37,8 @@ from . import donation, ratelimit, research, research_cache
 from .research_ui import ResearchPage
 from .browse_qt import BrowseController
 from .queue_qt import ProfileQueueRunner
+from .follows_qt import FollowsController
+from .follows_ui import FollowsPage
 
 
 def _app_icon() -> QIcon:
@@ -202,6 +204,7 @@ class MainWindow(QMainWindow):
             ("Ctrl+J", lambda: self.open_gallery()),
             ("Ctrl+K", self._focus_link_bar),
             ("Ctrl+Shift+F", lambda: self.open_research(self._profile_in_view())),
+            ("Ctrl+Shift+U", lambda: self.open_follows()),
             ("Ctrl+Shift+,", self._current_account_prefs),
             ("Ctrl+=", lambda: self._zoom_step(10)),
             ("Ctrl++", lambda: self._zoom_step(10)),
@@ -293,6 +296,9 @@ class MainWindow(QMainWindow):
         rv.addWidget(self.queue.bar)
         self.research_page = ResearchPage(self)
         self.stack.addWidget(self.research_page)
+        self.follows = FollowsController(self)
+        self.follows_page = FollowsPage(self)
+        self.stack.addWidget(self.follows_page)
         self._before_prefs = None
         rv.addWidget(self.stack, 1)
 
@@ -380,6 +386,7 @@ class MainWindow(QMainWindow):
         h.addWidget(queue_btn)
         h.addWidget(ui.icon_button("gallery", "Meus downloads (Ctrl+J)", lambda: self.open_gallery(self._current_folder())))
         h.addWidget(ui.icon_button("search", "Pesquisar perfil (Ctrl+Shift+F)", lambda: self.open_research(self._profile_in_view())))
+        h.addWidget(ui.icon_button("users", "Seguidores (Ctrl+Shift+U)", lambda: self.open_follows()))
         acc_btn = ui.icon_button("user", "Configurações da conta (Ctrl+Shift+,)", self._current_account_prefs)
         h.addWidget(acc_btn)
         h.addWidget(ui.icon_button("lock", "Bloquear (Ctrl+L)", lambda: self._lock()))
@@ -444,7 +451,8 @@ class MainWindow(QMainWindow):
             self._paint_button(acc.id)
 
     def _avatar_clicked(self, acc_id: str):
-        if getattr(self, "_was_current", False) and self.stack.currentWidget() not in (self.prefs, self.gallery, self.research_page):
+        if getattr(self, "_was_current", False) and self.stack.currentWidget() not in (self.prefs, self.gallery, self.research_page,
+                                                                                        self.follows_page):
             self._buttons[acc_id].setChecked(True)
             self._account_menu(acc_id)
         else:
@@ -1021,6 +1029,14 @@ class MainWindow(QMainWindow):
     def close_research(self):
         self.close_prefs(force=True)
 
+    def open_follows(self):
+        if self.outer.currentIndex() != 0:
+            return
+        self.header.hide()
+        self.stack.setCurrentWidget(self.follows_page)
+        self.follows_page.open()
+        self.follows_page.setFocus()
+
     # ----- rate limiting da pesquisa
     LOGIN_NEEDED = "Abra o Gramdesk e entre na conta antes de pesquisar."
 
@@ -1042,6 +1058,8 @@ class MainWindow(QMainWindow):
         """Erro que impede a coleta (texto) e a pasta de cache aproveitável. Erro vazio = pode seguir."""
         if self.research_job is not None and self.research_job.state not in research.STATES_FINAL:
             return "Já existe uma pesquisa em andamento.", None
+        if self.follows.busy:
+            return "Há uma tarefa de seguidores em andamento; espere ela terminar.", None
         s = self._research_session(account_name)
         if s is None or s.profile is None or not s.logged_in:
             return self.LOGIN_NEEDED, None
@@ -1106,6 +1124,7 @@ class MainWindow(QMainWindow):
             "locked": False,
             "research_running": job is not None and job.state not in research.STATES_FINAL,
             "browse": {"proto": 1, "busy": self.browse.busy},
+            "follows": {"proto": 1, "busy": self.follows.busy},
             "accounts": accounts,
             "limits": lim.to_dict(),
         }
@@ -1483,6 +1502,28 @@ def _listen(win: "MainWindow"):
                     return
                 conn.readyRead.disconnect()
                 QTimer.singleShot(0, lambda: win.browse.handle(req, reply))
+                return
+            if data.startswith("F "):
+                # Seguidores (status, check, list): a conexão fica aberta até responder.
+                try:
+                    req = json.loads(data[2:])
+                except ValueError:
+                    req = None
+
+                def freply(obj, conn=conn):
+                    try:
+                        if conn.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                            conn.write(json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n")
+                            conn.flush()
+                            conn.disconnectFromServer()
+                    except RuntimeError:
+                        pass
+
+                if not isinstance(req, dict):
+                    freply({"proto": 1, "ok": False, "code": 1, "message": "Pedido inválido."})
+                    return
+                conn.readyRead.disconnect()
+                QTimer.singleShot(0, lambda: win.follows.handle(req, freply))
                 return
             conn.disconnectFromServer()
             if data.startswith("R "):

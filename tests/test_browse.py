@@ -179,7 +179,7 @@ def test_jitter_varies(tmp_path):
     for i in range(10):
         st = RateState(tmp_path / f"r{i}.json")
         gaps.add(round(st.browse_touch("a1", lim, NOW, rng=rng) - NOW, 3))
-    assert len(gaps) == 10 and min(gaps) >= 20
+    assert len(gaps) == 10 and min(gaps) >= 8 and max(gaps) <= 20
 
 
 def test_daily_post_cap_and_counts_as_request(tmp_path):
@@ -211,5 +211,5 @@ def test_research_quota_does_not_block_browse(tmp_path):
 
 def test_browse_limits_are_clamped():
     lim = Limits.from_dict({"browse_interval": 1, "browse_daily_posts": 10_000, "browse_jitter": -5})
-    assert lim.browse_interval == 10.0 and lim.browse_daily_posts == 100 and lim.browse_jitter == 0.0
-    assert Limits().browse_daily_posts == 15 and Limits().browse_interval == 20.0
+    assert lim.browse_interval == 5.0 and lim.browse_daily_posts == 300 and lim.browse_jitter == 0.0
+    assert Limits().browse_daily_posts == 150 and Limits().browse_interval == 8.0 and Limits().browse_jitter == 12.0

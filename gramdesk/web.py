@@ -480,6 +480,39 @@ class AccountSession(QObject):
             QWebEngineScript.ScriptWorldId.MainWorld,
         )
 
+    def follow_call(self, page: GuardedPage, op: str, arg, cb, timeout_s: float = 60.0):
+        """Uma requisição de seguidores na página oculta; cb recebe {ok, data} | {ok:false, blocked|error}."""
+        req = security.new_request_id()
+        key = json.dumps(self._key)
+        tries = int(timeout_s / 0.3)
+        state = {"page": page}
+
+        def poll(n: int):
+            if n > tries:
+                cb({"ok": False, "error": "tempo esgotado"})
+                return
+
+            def got(raw):
+                if raw is None:
+                    QTimer.singleShot(300, lambda: poll(n + 1))
+                    return
+                try:
+                    data = json.loads(raw) if isinstance(raw, str) and len(raw) < 4_000_000 else {}
+                except ValueError:
+                    data = {}
+                cb(data if isinstance(data, dict) else {"ok": False, "error": "resposta inválida"})
+
+            try:
+                state["page"].runJavaScript(f"window[{key}].take({json.dumps(req)})", QWebEngineScript.ScriptWorldId.MainWorld, got)
+            except RuntimeError:  # página destruída
+                cb({"ok": False, "error": "página fechada"})
+
+        page.runJavaScript(
+            f"(window[{key}]||null)&&window[{key}].follow(...{json.dumps([req, op, arg])})",
+            QWebEngineScript.ScriptWorldId.MainWorld,
+            lambda ok: poll(0) if ok else cb({"ok": False, "error": "página ocupada ou carregando"}),
+        )
+
     def release_worker_page(self, page: GuardedPage):
         page.triggerAction(QWebEnginePage.WebAction.Stop)
         QTimer.singleShot(3000, page.deleteLater)  # deixa downloads em andamento se registrarem

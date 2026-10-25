@@ -9,7 +9,7 @@ Cliente desktop leve para o Instagram no Linux e no Windows, no estilo do ZapZap
 - **Multi-conta isolada**: cada conta tem seu próprio perfil Chromium (cookies, cache, localStorage e processos separados). Uma conta não enxerga a sessão da outra.
 - **Hibernação**: só a conta aberta consome CPU/RAM. Ao trocar, a anterior é descartada (padrão, libera memória) ou congelada, e volta ao ser aberta. Contas nunca abertas na sessão nem chegam a carregar.
 - **Modo fantasma** (por conta, `Ctrl+G`): stories abertos não marcam visualização. O app descarta as requisições de "visto" do story (REST e GraphQL) antes de saírem.
-- **Botão de baixar em cada mídia**: no feed, perfil, reels e stories aparece um botão sobre cada foto e vídeo. Em carrossel, o botão baixa só o slide visível e o *Todas (N)* baixa o post inteiro. Some quando um pop-up do site cobre a mídia. Desligável em Preferências > Downloads.
+- **Botão de baixar em cada mídia**: no feed, perfil, reels e stories aparece um botão sobre cada foto e vídeo. No feed ele fica no canto superior direito, logo abaixo do menu "...", para não sumir quando o nome da conta aparece sobre a foto. Em carrossel, o botão baixa só o slide visível e o *Todas (N)* baixa o post inteiro. Some quando um pop-up do site cobre a mídia. Desligável em Preferências > Downloads.
 - **Download pelo cabeçalho** (`Ctrl+D` ou botão direito > *Baixar esta mídia*): foto, vídeo (com áudio), carrossel, reels e story atual, sempre na maior resolução disponível.
 - **Abrir link ou @perfil** (`Ctrl+K`): cole um link do Instagram ou um @perfil na barra do cabeçalho e ele abre na conta selecionada. Ao voltar para o app com um link do Instagram copiado, aparece o atalho *Abrir em <conta>*. `gramdesk <link>` entrega o link para a janela já aberta.
 - **Baixar todos os stories** do perfil ou destaque aberto (`Ctrl+Shift+D`).
@@ -24,6 +24,39 @@ Cliente desktop leve para o Instagram no Linux e no Windows, no estilo do ZapZap
 - **Meus downloads** (`Ctrl+J`, ícone de grade na barra lateral ou no cabeçalho): galeria com tudo que já foi baixado, filtro por conta, fotos/vídeos e busca. Visualizador com setas, player de vídeo embutido, copiar imagem, abrir no app padrão e mover para a lixeira. Vídeos ganham capa automática. Itens já baixados não são duplicados.
 
 Downloads ficam em `~/Downloads/Gramdesk/<conta>/`.
+
+## Seguidores (`Ctrl+Shift+U`)
+
+Ícone de pessoas no cabeçalho. Usa a conta aberta, numa página oculta da mesma sessão, uma requisição por vez.
+
+- **Checar agora**: lê a lista de seguidores e de quem você segue (páginas de 50) e compara com a checagem anterior.
+- **Não seguidores**: quem você segue e não segue de volta, abaixo do limite de famoso.
+- **Não seguidores famosos**: os que têm seguidores acima do limite (padrão 10 mil, ajustável em Preferências > Seguidores). A contagem de seguidores de cada perfil é buscada sob demanda (*Contar seguidores*) e vale 30 dias; perfis sem contagem ficam na aba *Sem contagem* e não entram em lote.
+- **Deixar de seguir em lote**: um lote por aba, com confirmação e estimativa de tempo. Perfis marcados como *Manter* nunca entram. O lote fica salvo e é retomado de onde parou.
+- **Deixaram de seguir**: lista permanente. Cada checagem registra quem saiu (e quando voltou, se voltar). O app nunca apaga essa lista.
+- **Auditoria**: tudo que aconteceu (checagens, quem saiu, quem você removeu, lotes, bloqueios), em `audit.jsonl`.
+- **Checagem diária**: com o app aberto, refaz a checagem uma vez por dia nas contas logadas que já tiveram uma checagem manual (desligável nas Preferências). Para agendar fora do app:
+
+```bash
+ln -s "$PWD/tools/gramdesk_follows.py" ~/.local/bin/gramdesk-follows
+gramdesk-follows status
+gramdesk-follows check                 # roda sem pedir aprovação se a checagem diária estiver ligada
+gramdesk-follows list deixaram         # ou nao-seguidores, famosos; --json para máquina
+```
+
+Exemplo com timer do systemd (usuário): um `gramdesk-follows.service` com `ExecStart=%h/.local/bin/gramdesk-follows check` e um `.timer` com `OnCalendar=daily` e `Persistent=true`. A CLI nunca abre o app, nunca deixa de seguir ninguém e usa os mesmos códigos de saída da navegação (3 app fechado, 4 resfriamento, 5 teto, 6 ocupado, 7 recusado).
+
+| Regra | Padrão |
+|---|---|
+| Leitura das listas e contagens | mesmo ritmo da pesquisa (2,5 a 6 s, pausa longa a cada 8, 60 por hora), conta na cota diária de itens |
+| Intervalo entre remoções | 30 a 60 s aleatórios, uma por vez, pausa de 3 a 7 min a cada 10 |
+| Remoções por conta | 20 por hora, 100 por dia (ajustável até 200, teto rígido) |
+| "Vá mais devagar" (429, "Tente novamente mais tarde") | não para: pausa de 5, 10, 20 e 40 min, segue 2x mais lento a cada aviso (até 8x, por 6 h) e repete a mesma requisição; só desiste e entra em resfriamento após 4 avisos seguidos ou 6 na tarefa |
+| Teto por hora | espera a janela andar e continua |
+| Contagem de seguidores | começa 3x mais lenta que a leitura de listas, 60 perfis por rodada |
+| Checkpoint, login ou bloqueio de ação (`feedback_required`) | para na hora, sem novas tentativas, e ativa o resfriamento da conta |
+
+Dados em `follows/<conta>/` no diretório de dados do app (`state.json`, `unfollowers.json`, `batch.json`, `audit.jsonl`), permissão 600.
 
 ## Pesquisa de perfil + análise com Claude
 
@@ -48,7 +81,7 @@ Para nunca martelar o Instagram e proteger a conta, cada requisição da coleta 
 | Intervalo entre requisições | 2,5 a 6 s, aleatório, uma por vez (concorrência 1) |
 | Pausa longa | 20 a 45 s a cada 8 requisições |
 | Teto por conta | 8 por minuto, 60 por hora |
-| Cota diária por conta | 3 pesquisas e 200 requisições |
+| Cota diária por conta | 3 pesquisas e 400 requisições |
 | Downloads de mídia | um por vez, 0,4 a 1,2 s entre arquivos |
 | Cache | pesquisa do mesmo perfil nas últimas 24 h é reaproveitada; só o que falta é buscado |
 
@@ -90,9 +123,9 @@ gramdesk-browse download https://www.instagram.com/p/CODIGO/ --index 2 [--out PA
 
 | Regra | Padrão |
 |---|---|
-| Intervalo entre ações de navegação (abrir, inspecionar, baixar, rolar) | 20 s + 0 a 10 s aleatórios, contados do fim da ação anterior; se chamar antes, o app espera o restante e avisa |
-| Aberturas de post por conta e por dia | 15 (Preferências > Pesquisa de perfil > Navegação passo a passo) |
-| Cada ação | conta como 1 item da cota diária (200) e do teto por hora (60) da pesquisa |
+| Intervalo entre ações de navegação (abrir, inspecionar, baixar, rolar) | 8 s + 0 a 12 s aleatórios, contados do fim da ação anterior; se chamar antes, o app espera o restante e avisa |
+| Aberturas de post por conta e por dia | 150 (Preferências > Pesquisa de perfil > Navegação passo a passo, até 300) |
+| Cada ação | conta como 1 item da cota diária (400) e do teto por hora (60) da pesquisa |
 | Primeira ação de cada sessão do app | pede aprovação na janela |
 | Sinal de bloqueio na página (checkpoint, "Tente novamente mais tarde", tela de login) | para na hora, sem novas tentativas, e ativa o resfriamento da conta |
 

@@ -13,9 +13,9 @@ Uso:
   gramdesk-browse download <url-do-post> [--index N] [--out PASTA]
   Opção global: --account NOME (padrão: a conta selecionada na janela)
 
-Ritmo e proteção (decididos pelo app): intervalo mínimo entre ações de navegação (20 s + 0 a 10 s
+Ritmo e proteção (decididos pelo app): intervalo mínimo entre ações de navegação (8 s + 0 a 12 s
 aleatórios, contados do fim da ação anterior; se chamar antes, o app espera o restante), cada ação
-conta como 1 item da cota diária, teto diário de aberturas de post (15), resfriamento após qualquer
+conta como 1 item da cota diária, teto diário de aberturas de post (150), resfriamento após qualquer
 sinal de bloqueio. A primeira ação de cada sessão do app pede aprovação na janela.
 
 Códigos de saída: 0 ok · 1 erro · 3 app fechado, bloqueado, versão antiga ou conta sem login ·

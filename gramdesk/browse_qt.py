@@ -66,6 +66,10 @@ class BrowseController(QObject):
         if job is not None and job.state not in ("done", "error", "cancelled", "refused"):
             answer(BUSY, "Há uma pesquisa de perfil em andamento; a navegação espera ela terminar.")
             return
+        follows = getattr(win, "follows", None)
+        if follows is not None and follows.busy:
+            answer(BUSY, "Há uma tarefa de seguidores em andamento; a navegação espera ela terminar.")
+            return
         s = win._research_session(str(req.get("account", ""))[:40])
         if s is None or s.profile is None or s.page is None or not s.logged_in:
             answer(APP, LOGIN_NEEDED)

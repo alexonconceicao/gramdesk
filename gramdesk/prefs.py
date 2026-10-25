@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (
     QScrollArea,
     QSystemTrayIcon,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -28,6 +29,7 @@ SECTIONS = (
     ("privacy", "Privacidade e segurança", "shield"),
     ("downloads", "Downloads", "folder"),
     ("research", "Pesquisa de perfil", "search"),
+    ("follows", "Seguidores", "users"),
     ("shortcuts", "Atalhos", "keyboard"),
     ("about", "Sobre", "info"),
 )
@@ -39,6 +41,7 @@ SHORTCUTS = (
     ("Ctrl+J", "Meus downloads (galeria)"),
     ("Ctrl+K", "Colar link ou @perfil e abrir na conta atual"),
     ("Ctrl+Shift+F", "Pesquisa de perfil (coleta para análise)"),
+    ("Ctrl+Shift+U", "Seguidores (não seguidores, famosos, quem deixou de seguir)"),
     ("Ctrl+G", "Ligar/desligar modo fantasma"),
     ("Ctrl+L", "Bloquear o app"),
     ("Ctrl+,", "Preferências"),
@@ -436,7 +439,7 @@ class PreferencesPage(QWidget):
         b.addWidget(ui.setting_row("Pesquisas por dia", "Coletas que acessam o Instagram, por conta.",
                                    seg("daily_researches", [(1, "1"), (2, "2"), (3, "3"), (5, "5")], lim.daily_researches)))
         b.addWidget(ui.setting_row("Itens por dia", "Requisições à API por conta (perfil, página de posts, comentários, destaques).",
-                                   seg("daily_items", [(100, "100"), (200, "200"), (400, "400")], lim.daily_items)))
+                                   seg("daily_items", [(200, "200"), (400, "400"), (800, "800")], lim.daily_items)))
         b.addWidget(_section_title("Ritmo"))
         b.addWidget(ui.setting_row("Itens por hora", f"Teto na última hora. Por minuto: {lim.per_minute}.",
                                    seg("per_hour", [(30, "30"), (60, "60"), (90, "90")], lim.per_hour)))
@@ -455,12 +458,12 @@ class PreferencesPage(QWidget):
             "muted", True,
         ))
         b.addWidget(ui.setting_row("Posts abertos por dia", "Teto de aberturas de post por conta (inspecionar ou baixar).",
-                                   seg("browse_daily_posts", [(10, "10"), (15, "15"), (25, "25"), (40, "40")],
+                                   seg("browse_daily_posts", [(50, "50"), (100, "100"), (150, "150"), (300, "300")],
                                        lim.browse_daily_posts)))
         b.addWidget(ui.setting_row("Intervalo entre ações",
                                    f"Agora: {lim.browse_interval:g} s mais 0 a {lim.browse_jitter:g} s aleatórios, "
                                    "contados a partir do fim da ação anterior.",
-                                   seg("browse_interval", [("20.0", "20 s"), ("40.0", "40 s"), ("60.0", "60 s")],
+                                   seg("browse_interval", [("5.0", "5 s"), ("8.0", "8 s"), ("15.0", "15 s"), ("30.0", "30 s")],
                                        f"{lim.browse_interval:.1f}")))
         cur = win.current
         if cur is not None:
@@ -473,6 +476,65 @@ class PreferencesPage(QWidget):
             st = win.rate.status(cur.account.id, lim)
             txt = st["message"] or (f"Liberada. Hoje: {st['researches_today']} pesquisas, {st['items_today']} itens.")
             b.addWidget(ui.setting_row(f"Situação de {cur.account.name}", txt, QWidget()))
+
+    def _follows(self):
+        win = self.win
+        lim = win.research_limits()
+        b = self.body
+        b.addWidget(_label(
+            "Checagem de seguidores, não seguidores e remoção em lote. Remover é bem mais devagar que ler: "
+            "uma remoção por vez, com pausas longas, e para ao primeiro sinal de limite do Instagram.",
+            "muted", True,
+        ))
+
+        def set_limit(key, value):
+            win.set_option("research_limits", {key: value})
+            self._refresh_soon()
+
+        b.addWidget(_section_title("Famosos"))
+        spin = QSpinBox()
+        spin.setRange(1000, 100_000_000)
+        spin.setSingleStep(1000)
+        spin.setGroupSeparatorShown(True)
+        spin.setSuffix(" seguidores")
+        spin.setValue(lim.famous_threshold)
+        spin.setMinimumWidth(190)
+        spin.editingFinished.connect(lambda: set_limit("famous_threshold", spin.value()))
+        b.addWidget(ui.setting_row("Limite de famoso",
+                                   "Não seguidores com essa quantidade de seguidores ou mais vão para a lista de famosos "
+                                   "e saem do lote de não seguidores comuns.", spin))
+
+        def seg(key, options, current):
+            w = ui.Segmented([(str(v), lbl) for v, lbl in options], str(current))
+            w.changed.connect(lambda v, key=key: set_limit(key, float(v) if "." in v else int(v)))
+            return w
+
+        b.addWidget(_section_title("Ritmo das remoções"))
+        b.addWidget(ui.setting_row("Remoções por dia", "Teto por conta; nunca passa de 200.",
+                                   seg("unfollow_daily", [(50, "50"), (100, "100"), (150, "150"), (200, "200")],
+                                       lim.unfollow_daily)))
+        b.addWidget(ui.setting_row("Remoções por hora", "Teto na última hora.",
+                                   seg("unfollow_per_hour", [(10, "10"), (20, "20"), (30, "30")], lim.unfollow_per_hour)))
+        pace = ui.Segmented([("30.0", "30 a 60 s"), ("60.0", "60 a 120 s"), ("120.0", "2 a 4 min")],
+                            f"{lim.unfollow_min_delay:.1f}")
+        pace.changed.connect(lambda v: (win.set_option("research_limits", {"unfollow_min_delay": float(v),
+                                                                           "unfollow_max_delay": float(v) * 2}),
+                                        self._refresh_soon()))
+        b.addWidget(ui.setting_row("Intervalo entre remoções",
+                                   f"Agora: {lim.unfollow_min_delay:g} a {lim.unfollow_max_delay:g} s, com pausa de 3 a 7 min "
+                                   f"a cada {lim.unfollow_long_every} remoções.", pace))
+        b.addWidget(_section_title("Checagem diária"))
+        t = ui.Toggle(bool(lim.follow_check))
+        t.toggled.connect(lambda on: set_limit("follow_check", 1 if on else 0))
+        b.addWidget(ui.setting_row("Checar todo dia quem deixou de seguir",
+                                   "Com o app aberto, refaz a checagem uma vez por dia nas contas logadas que já tiveram "
+                                   "uma checagem manual. Também vale para o comando gramdesk-follows check.", t))
+        cur = win.current
+        if cur is not None:
+            u = win.rate.unfollow_status(cur.account.id, lim)
+            b.addWidget(ui.setting_row(f"Remoções de {cur.account.name}",
+                                       u["message"] or f"Hoje: {u['unfollows_today']} de {u['unfollow_cap']}.", QWidget()))
+        b.addWidget(_button("Abrir Seguidores", win.open_follows, "primary", "users", "white"), 0, Qt.AlignmentFlag.AlignLeft)
 
     def _shortcuts(self):
         panel = QFrame()

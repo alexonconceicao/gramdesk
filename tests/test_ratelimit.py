@@ -192,3 +192,28 @@ def test_link_externo_do_instagram_abre_fora():
     assert unwrap_link_shim("https://l.instagram.com/?u=https%3A%2F%2Fwa.me%2F5571999&e=AT0") == "https://wa.me/5571999"
     assert unwrap_link_shim("https://www.instagram.com/perfil/") is None
     assert unwrap_link_shim("https://l.instagram.com/?u=javascript%3Aalert(1)") is None
+
+
+# ---------------------------------------------------------------- desacelerar em vez de parar
+def test_soft_backoff_grows_then_gives_up():
+    from gramdesk.ratelimit import SOFT_BACKOFF, soft_backoff
+
+    rng = random.Random(1)
+    waits = [soft_backoff(n, rng) for n in range(1, len(SOFT_BACKOFF) + 1)]
+    assert all(0.8 * b <= w <= 1.2 * b for w, b in zip(waits, SOFT_BACKOFF))
+    assert waits[0] >= 240 and soft_backoff(len(SOFT_BACKOFF) + 1) is None and soft_backoff(0) is None
+
+
+def test_soft_hits_slow_next_pacer(tmp_path):
+    st = RateState(tmp_path / "r.json")
+    lim = Limits()
+    assert st.pacer("a1", lim, NOW).slow == 1.0
+    assert st.record_soft("a1", NOW) == 2.0
+    st.record_soft("a1", NOW + 10)
+    again = RateState(tmp_path / "r.json")
+    p = again.pacer("a1", lim, NOW + 60, rng=random.Random(2))
+    assert p.slow == 4.0
+    p.record(NOW + 60)
+    assert p.decide(NOW + 60).wait >= lim.min_delay * 4
+    assert again.slow_factor("a1", NOW + 7 * 3600) == 1.0  # passa depois de 6 h
+    assert st.check("a1", lim, NOW + 20)["ok"]  # aviso tratado com espera não gera resfriamento

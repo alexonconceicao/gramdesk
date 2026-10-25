@@ -1,0 +1,96 @@
+"""Ponte de seguidores do inject.js no node: requisição certa, sessão pelos cookies e bloqueio detectado."""
+
+import json
+import shutil
+import subprocess
+from importlib import resources
+
+import pytest
+
+HARNESS = r"""
+const fs = require('fs');
+const [srcFile, inFile] = process.argv.slice(2);
+const input = JSON.parse(fs.readFileSync(inFile, 'utf8'));
+globalThis.window = globalThis;
+const calls = [];
+globalThis.fetch = async (url, init) => {
+  calls.push({ url: String(url), method: (init && init.method) || 'GET', headers: (init && init.headers) || {},
+               body: (init && init.body) || '' });
+  const r = input.response;
+  return { status: r.status, ok: r.status >= 200 && r.status < 300, redirected: false, url: String(url),
+           text: async () => r.body };
+};
+globalThis.XMLHttpRequest = function () {};
+XMLHttpRequest.prototype.open = function () {};
+XMLHttpRequest.prototype.send = function () {};
+globalThis.location = { pathname: '/', href: 'https://www.instagram.com/' };
+globalThis.document = { cookie: input.cookie, querySelectorAll: () => [], querySelector: () => null,
+                        documentElement: null, hidden: false };
+globalThis.innerWidth = 1280; globalThis.innerHeight = 900;
+eval(fs.readFileSync(srcFile, 'utf8'));
+const b = window['__gd_test'];
+(async () => {
+  const out = { accepted: b.follow('0123456789abcdef', input.op, input.arg) };
+  for (let i = 0; i < 200 && out.accepted; i++) {
+    const r = b.take('0123456789abcdef');
+    if (r) { out.result = JSON.parse(r); break; }
+    await new Promise((ok) => setTimeout(ok, 10));
+  }
+  out.calls = calls;
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+COOKIE = "csrftoken=abc123; ds_user_id=4242; mid=x"
+
+
+def run(tmp_path, op, arg, status=200, body="{}", cookie=COOKIE):
+    if not shutil.which("node"):
+        pytest.skip("node ausente")
+    src = resources.files("gramdesk").joinpath("inject.js").read_text(encoding="utf-8")
+    src = (src.replace("__GD_KEY__", "__gd_test").replace("__GD_GHOST__", "false")
+           .replace("__GD_TOKEN__", "t" * 32).replace("__GD_BUTTONS__", "false"))
+    (tmp_path / "inject.js").write_text(src, encoding="utf-8")
+    (tmp_path / "in.json").write_text(json.dumps({"op": op, "arg": arg, "cookie": cookie,
+                                                  "response": {"status": status, "body": body}}), encoding="utf-8")
+    (tmp_path / "h.js").write_text(HARNESS, encoding="utf-8")
+    r = subprocess.run(["node", str(tmp_path / "h.js"), str(tmp_path / "inject.js"), str(tmp_path / "in.json")],
+                       capture_output=True, text=True, timeout=30, check=True)
+    return json.loads(r.stdout)
+
+
+def test_followers_page(tmp_path):
+    body = json.dumps({"users": [{"pk": 11, "username": "ana", "full_name": "Ana", "is_verified": True,
+                                  "profile_pic_url": "https://x"}], "next_max_id": "QVFE", "status": "ok"})
+    out = run(tmp_path, "followers", "QVFD", body=body)
+    assert len(out["calls"]) == 1
+    url = out["calls"][0]["url"]
+    assert url.startswith("/api/v1/friendships/4242/followers/?count=50") and "max_id=QVFD" in url
+    assert out["result"] == {"ok": True, "data": {"users": [{"pk": "11", "username": "ana", "full_name": "Ana",
+                                                            "is_verified": True, "is_private": False}],
+                                                 "cursor": "QVFE", "more": True}}
+
+
+def test_unfollow_posts_with_csrf_and_checks_result(tmp_path):
+    out = run(tmp_path, "unfollow", "777", body=json.dumps({"friendship_status": {"following": False}, "status": "ok"}))
+    c = out["calls"][0]
+    assert c["method"] == "POST" and c["url"] == "/api/v1/friendships/destroy/777/"
+    assert c["headers"]["X-CSRFToken"] == "abc123" and "user_id=777" in c["body"]
+    assert out["result"] == {"ok": True, "data": {"ok": True}}
+
+
+def test_unfollow_not_confirmed_is_error(tmp_path):
+    out = run(tmp_path, "unfollow", "777", body=json.dumps({"friendship_status": {"following": True}, "status": "ok"}))
+    assert out["result"]["ok"] is False and "não confirmou" in out["result"]["error"]
+
+
+def test_rate_limit_is_reported_as_block(tmp_path):
+    out = run(tmp_path, "unfollow", "777", status=429, body="Please wait a few minutes before you try again.")
+    assert out["result"]["ok"] is False and out["result"]["blocked"]["status"] == 429
+
+
+def test_invalid_args_and_no_session_never_hit_network(tmp_path):
+    assert run(tmp_path, "unfollow", "abc")["calls"] == []
+    out = run(tmp_path, "following", "", cookie="mid=x")
+    assert out["calls"] == [] and out["result"]["error"] == "sem sessão"
+    assert run(tmp_path, "apagar", "1")["accepted"] is False

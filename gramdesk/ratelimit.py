@@ -29,6 +29,13 @@ COOLDOWN_MAX = 24 * 3600  # teto: 24 h
 HOUR = 3600.0
 MINUTE = 60.0
 MAX_WAIT_IN_JOB = 300.0  # espera maior que isso (teto por hora) encerra a coleta como parcial
+UNFOLLOW_HARD_CAP = 200  # remoções por conta e por dia, nunca acima disso
+UNFOLLOW_LONG = (180.0, 420.0)  # pausa longa no lote de remoções (s)
+# "Vá mais devagar" (429/limite) em tarefas longas: em vez de parar, espera e segue mais lento.
+SOFT_BACKOFF = (300.0, 600.0, 1200.0, 2400.0)  # 5, 10, 20, 40 min antes de tentar de novo
+SOFT_MAX_TOTAL = 6  # avisos de limite numa tarefa antes de desistir (aí sim resfriamento)
+SOFT_WINDOW = 6 * 3600.0  # avisos recentes deixam as próximas tarefas mais lentas
+SLOW_MAX = 8.0
 
 BLOCK_KINDS = ("rate-limit", "checkpoint", "login")
 BLOCK_LABEL = {
@@ -42,7 +49,7 @@ BLOCK_LABEL = {
 @dataclass
 class Limits:
     daily_researches: int = 3  # pesquisas com acesso à rede por conta e por dia
-    daily_items: int = 200  # requisições à API por conta e por dia
+    daily_items: int = 400  # requisições à API por conta e por dia
     per_hour: int = 60  # requisições por conta na última hora
     per_minute: int = 8  # requisições por conta no último minuto
     min_delay: float = 2.5  # intervalo mínimo entre requisições (s)
@@ -52,13 +59,21 @@ class Limits:
     long_max: float = 45.0
     cache_hours: int = 24  # validade do cache de uma pesquisa
     # Navegação passo a passo (gramdesk-browse): uma ação por vez, na janela do app.
-    browse_interval: float = 20.0  # intervalo mínimo entre ações de navegação (s)
-    browse_jitter: float = 10.0  # acréscimo aleatório de 0 até este valor (s)
-    browse_daily_posts: int = 15  # aberturas de post por conta e por dia
+    browse_interval: float = 8.0  # intervalo mínimo entre ações de navegação (s)
+    browse_jitter: float = 12.0  # acréscimo aleatório de 0 até este valor (s)
+    browse_daily_posts: int = 150  # aberturas de post por conta e por dia
+    # Deixar de seguir em lote: uma remoção por vez, bem mais devagar que leitura.
+    unfollow_min_delay: float = 30.0  # intervalo mínimo entre remoções (s)
+    unfollow_max_delay: float = 60.0
+    unfollow_per_hour: int = 20
+    unfollow_daily: int = 100  # teto rígido em UNFOLLOW_HARD_CAP
+    unfollow_long_every: int = 10  # a cada N remoções, uma pausa longa (UNFOLLOW_LONG)
+    famous_threshold: int = 10000  # seguidores a partir dos quais o perfil conta como famoso
+    follow_check: int = 1  # checagem diária automática de quem deixou de seguir (1 liga, 0 desliga)
 
     RANGES = {
         "daily_researches": (1, 10),
-        "daily_items": (30, 600),
+        "daily_items": (30, 1000),
         "per_hour": (10, 150),
         "per_minute": (2, 12),
         "min_delay": (2.0, 30.0),
@@ -67,9 +82,16 @@ class Limits:
         "long_min": (5.0, 300.0),
         "long_max": (5.0, 600.0),
         "cache_hours": (1, 168),
-        "browse_interval": (10.0, 300.0),
+        "browse_interval": (5.0, 300.0),
         "browse_jitter": (0.0, 120.0),
-        "browse_daily_posts": (1, 100),
+        "browse_daily_posts": (1, 300),
+        "unfollow_min_delay": (20.0, 600.0),
+        "unfollow_max_delay": (25.0, 900.0),
+        "unfollow_per_hour": (5, 40),
+        "unfollow_daily": (10, UNFOLLOW_HARD_CAP),
+        "unfollow_long_every": (5, 30),
+        "famous_threshold": (1000, 100_000_000),
+        "follow_check": (0, 1),
     }
 
     @classmethod
@@ -87,6 +109,7 @@ class Limits:
         lim.max_delay = max(lim.max_delay, lim.min_delay + 0.5)
         lim.long_max = max(lim.long_max, lim.long_min)
         lim.per_minute = min(lim.per_minute, lim.per_hour)
+        lim.unfollow_max_delay = max(lim.unfollow_max_delay, lim.unfollow_min_delay + 5)
         return lim
 
     def to_dict(self) -> dict:
@@ -110,6 +133,7 @@ class Pacer:
         self.rng = rng or random.Random()
         self.count = 0  # requisições feitas nesta coleta
         self.last = self.recent[-1] if self.recent else 0.0
+        self.slow = 1.0  # multiplica intervalos e pausas (sobe a cada aviso de limite)
 
     def decide(self, now: float) -> Decision:
         lim = self.limits
@@ -118,6 +142,7 @@ class Pacer:
         gap = self.rng.uniform(lim.min_delay, lim.max_delay)
         if self.count and self.count % lim.long_every == 0:
             gap += self.rng.uniform(lim.long_min, lim.long_max)
+        gap *= self.slow
         earliest = max(now, self.last + gap) if self.last else now + self.rng.uniform(0.5, 1.5)
         # Teto por minuto: o per_minute-ésimo mais recente precisa sair da janela.
         if len(self.recent) >= lim.per_minute:
@@ -135,6 +160,13 @@ class Pacer:
         self.recent.append(ts)
         cutoff = ts - HOUR
         self.recent = [t for t in self.recent if t > cutoff]
+
+
+def soft_backoff(n: int, rng: random.Random | None = None) -> float | None:
+    """Espera antes de tentar de novo após o n-ésimo aviso seguido de limite (±20%). None = desistir."""
+    if n < 1 or n > len(SOFT_BACKOFF):
+        return None
+    return SOFT_BACKOFF[n - 1] * (rng or random).uniform(0.8, 1.2)
 
 
 def download_gap(rng: random.Random | None = None) -> float:
@@ -222,7 +254,8 @@ def _atomic_write(path: Path, data) -> None:
 def _blank() -> dict:
     return {"level": 0, "cooldown_until": 0.0, "last_block": "", "last_block_at": 0.0,
             "day": "", "researches": 0, "items": 0, "recent": [],
-            "browse_posts": 0, "browse_actions": 0, "browse_next": 0.0}
+            "browse_posts": 0, "browse_actions": 0, "browse_next": 0.0,
+            "unfollows": 0, "unfollow_recent": [], "unfollow_next": 0.0, "soft": []}
 
 
 def _num(v, default=0.0) -> float:
@@ -261,6 +294,12 @@ class RateState:
                 e["browse_posts"] = max(0, int(_num(a.get("browse_posts"))))
                 e["browse_actions"] = max(0, int(_num(a.get("browse_actions"))))
                 e["browse_next"] = _num(a.get("browse_next"))
+                e["unfollows"] = max(0, int(_num(a.get("unfollows"))))
+                urec = a.get("unfollow_recent") if isinstance(a.get("unfollow_recent"), list) else []
+                e["unfollow_recent"] = sorted(_num(t) for t in urec[-100:] if _num(t) > 0)
+                e["unfollow_next"] = _num(a.get("unfollow_next"))
+                soft = a.get("soft") if isinstance(a.get("soft"), list) else []
+                e["soft"] = sorted(_num(t) for t in soft[-50:] if _num(t) > 0)
                 self.data["accounts"][key] = e
 
     def save(self) -> None:
@@ -270,8 +309,10 @@ class RateState:
         e = self.data["accounts"].setdefault(acc, _blank())
         today = day_key(now)
         if e["day"] != today:
-            e.update(day=today, researches=0, items=0, browse_posts=0, browse_actions=0)
+            e.update(day=today, researches=0, items=0, browse_posts=0, browse_actions=0, unfollows=0)
         e["recent"] = [t for t in e["recent"] if t > now - HOUR]
+        e["unfollow_recent"] = [t for t in e.get("unfollow_recent", []) if t > now - HOUR]
+        e["soft"] = [t for t in e.get("soft", []) if t > now - 24 * HOUR]
         return e
 
     # ----- consultas
@@ -315,7 +356,22 @@ class RateState:
     def pacer(self, acc: str, limits: Limits, now: float | None = None, rng: random.Random | None = None) -> Pacer:
         now = time.time() if now is None else now
         e = self._acc(acc, now)
-        return Pacer(limits, e["recent"], limits.daily_items - e["items"], rng)
+        p = Pacer(limits, e["recent"], limits.daily_items - e["items"], rng)
+        p.slow = self.slow_factor(acc, now)
+        return p
+
+    def slow_factor(self, acc: str, now: float | None = None) -> float:
+        """2x mais lento por aviso de limite nas últimas 6 h (até 8x)."""
+        now = time.time() if now is None else now
+        n = sum(1 for t in self._acc(acc, now)["soft"] if t > now - SOFT_WINDOW)
+        return min(SLOW_MAX, 2.0 ** n)
+
+    def record_soft(self, acc: str, now: float | None = None) -> float:
+        """Aviso de limite tratado com espera (sem resfriamento). Devolve o novo fator de lentidão."""
+        now = time.time() if now is None else now
+        self._acc(acc, now)["soft"].append(now)
+        self.save()
+        return self.slow_factor(acc, now)
 
     # ----- registros
     def begin(self, acc: str, now: float | None = None) -> None:
@@ -415,6 +471,54 @@ class RateState:
         return {**chk, "posts_today": e["browse_posts"], "actions_today": e["browse_actions"],
                 "posts_limit": limits.browse_daily_posts, "next_at": e["browse_next"] if e["browse_next"] > now else 0.0,
                 "interval": limits.browse_interval, "jitter": limits.browse_jitter}
+
+
+    # ----- deixar de seguir (lote)
+    def unfollow_check(self, acc: str, limits: Limits, now: float | None = None) -> dict:
+        """Pode fazer UMA remoção agora? Mesmo formato de browse_check(): ok, reason, until, message, wait."""
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        base = {"ok": True, "reason": "", "until": 0.0, "message": "", "wait": max(0.0, e["unfollow_next"] - now)}
+        if e["cooldown_until"] > now:
+            label = BLOCK_LABEL.get(e["last_block"], "O Instagram limitou a conta")
+            return {**base, "ok": False, "reason": "cooldown", "until": e["cooldown_until"],
+                    "message": f"{label}. Resfriamento ativo: aguarde até {hhmm(e['cooldown_until'], now)} "
+                               f"(faltam {human_left(e['cooldown_until'] - now)})."}
+        cap = min(limits.unfollow_daily, UNFOLLOW_HARD_CAP)
+        if e["unfollows"] >= cap:
+            until = next_midnight(now)
+            return {**base, "ok": False, "reason": "unfollows", "until": until,
+                    "message": f"Cota diária de remoções atingida ({e['unfollows']} de {cap}). "
+                               f"O lote continua a partir de {hhmm(until, now)}."}
+        rec = e["unfollow_recent"]
+        if len(rec) >= limits.unfollow_per_hour:
+            base["wait"] = max(base["wait"], rec[-limits.unfollow_per_hour] + HOUR + 5 - now)
+        if len(e["recent"]) >= limits.per_hour:
+            base["wait"] = max(base["wait"], e["recent"][-limits.per_hour] + HOUR + 1 - now)
+        return base
+
+    def record_unfollow(self, acc: str, limits: Limits, now: float | None = None,
+                        rng: random.Random | None = None) -> float:
+        """Conta uma remoção (e uma requisição) e agenda a próxima. Devolve esse horário."""
+        now = time.time() if now is None else now
+        rng = rng or random
+        e = self._acc(acc, now)
+        e["unfollows"] += 1
+        e["unfollow_recent"].append(now)
+        e["recent"].append(now)
+        gap = rng.uniform(limits.unfollow_min_delay, limits.unfollow_max_delay)
+        if e["unfollows"] % limits.unfollow_long_every == 0:
+            gap += rng.uniform(*UNFOLLOW_LONG)
+        e["unfollow_next"] = max(e["unfollow_next"], now + gap)
+        self.save()
+        return e["unfollow_next"]
+
+    def unfollow_status(self, acc: str, limits: Limits, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        e = self._acc(acc, now)
+        chk = self.unfollow_check(acc, limits, now)
+        return {**chk, "unfollows_today": e["unfollows"], "unfollow_cap": min(limits.unfollow_daily, UNFOLLOW_HARD_CAP),
+                "unfollows_last_hour": len(e["unfollow_recent"])}
 
 
 # ---------------------------------------------------------------- log

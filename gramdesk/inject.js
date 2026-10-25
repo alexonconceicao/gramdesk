@@ -480,6 +480,7 @@
     return true;
   };
 
+  const feedRight = () => location.pathname === '/';
   const PROFILE_RE = /profile picture|foto do perfil|foto de perfil|avatar/i;
   const candidates = () => {
     const out = [];
@@ -492,7 +493,10 @@
       if (r.width < 180 || r.height < 180 || r.bottom < 0 || r.top > innerHeight) continue;
       const c = visible(el);
       if (c.w < 140 || c.h < 120) continue;
-      if (covered(el, c.L + 27, c.T + 27) && covered(el, (c.L + c.R) / 2, (c.T + c.B) / 2)) continue;
+      // No feed o botão fica no canto superior direito (abaixo do menu "..."):
+      // testa esse canto, porque o nome da conta pode cobrir o esquerdo.
+      const cx = feedRight() ? c.R - 27 : c.L + 27;
+      if (covered(el, cx, c.T + 27) && covered(el, (c.L + c.R) / 2, (c.T + c.B) / 2)) continue;
       // Imagem de capa sob o próprio vídeo: um botão só.
       if (taken.some((t) => Math.abs(t.L - c.L) < 8 && Math.abs(t.T - c.T) < 8 && Math.abs(t.w - c.w) < 16)) continue;
       taken.push(c);
@@ -528,8 +532,9 @@
       if (story) {
         used = place(used, el, false, 'Baixar story', { right: innerWidth - c.R + 12, top: c.T + 72 });
       } else {
-        used = place(used, el, false, n > 1 ? 'Baixar esta' : 'Baixar', { left: c.L + 10, top: c.T + 10 });
-        if (n > 1) used = place(used, el, true, 'Todas (' + n + ')', { left: c.L + 10, top: c.T + 48 });
+        const x = feedRight() ? { right: innerWidth - c.R + 10 } : { left: c.L + 10 };
+        used = place(used, el, false, n > 1 ? 'Baixar esta' : 'Baixar', { ...x, top: c.T + 10 });
+        if (n > 1) used = place(used, el, true, 'Todas (' + n + ')', { ...x, top: c.T + 48 });
       }
     }
     for (let i = used; i < pool.length; i++) pool[i].style.display = 'none';
@@ -577,12 +582,12 @@
 
   const BAD_URL = /instagram\.com\/(accounts\/login|challenge|checkpoint)/;
   const BAD_TEXT = /please wait a few minutes|try again later|tente novamente mais tarde|aguarde alguns minutos|checkpoint_required|challenge_required|login_required|feedback_required/i;
-  const apiJson = async (path) => {
+  const apiJson = async (path, init) => {
     lastApiAt = Date.now();
-    const r = await origFetch.call(window, path, {
+    const r = await origFetch.call(window, path, Object.assign({
       credentials: 'include',
       headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest' },
-    });
+    }, init || {}));
     let text = '';
     try { text = await r.text(); } catch (_) {}
     let j = null;
@@ -802,6 +807,61 @@
     }
   };
 
+  // ---------- seguidores (listas, contagem, deixar de seguir) ----------
+  // Uma requisição por chamada; o app decide o ritmo (intervalo, tetos, cota, resfriamento)
+  // e só chama a próxima depois de receber o resultado desta.
+  const cookie = (name) => {
+    const m = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  };
+  const slimUser = (u) => ({
+    pk: String(u.pk || u.pk_id || u.id || ''), username: String(u.username || ''),
+    full_name: clip(u.full_name || '', 120), is_verified: !!u.is_verified, is_private: !!u.is_private,
+  });
+  const followOp = async (op, a) => {
+    const gap = Date.now() - lastApiAt;
+    if (gap < FLOOR_MS) await sleep(FLOOR_MS - gap);
+    if (op === 'me') {
+      const id = cookie('ds_user_id');
+      if (!/^\d{1,25}$/.test(id)) throw new Error('sem sessão');
+      return { id };
+    }
+    if (op === 'followers' || op === 'following') {
+      const id = cookie('ds_user_id');
+      if (!/^\d{1,25}$/.test(id)) throw new Error('sem sessão');
+      const cur = typeof a === 'string' && /^[A-Za-z0-9_=|:.-]{1,300}$/.test(a) ? a : '';
+      const q = '/api/v1/friendships/' + id + '/' + op + '/?count=50' +
+        (op === 'followers' ? '&search_surface=follow_list_page' : '') + (cur ? '&max_id=' + encodeURIComponent(cur) : '');
+      const j = await apiJson(q);
+      const users = (j.users || []).slice(0, 200).map(slimUser);
+      const next = j.next_max_id != null ? String(j.next_max_id) : '';
+      return { users, cursor: next, more: !!next && users.length > 0 };
+    }
+    if (op === 'profile') {
+      if (typeof a !== 'string' || !/^[A-Za-z0-9._]{1,30}$/.test(a)) throw new Error('perfil inválido');
+      const j = await apiJson('/api/v1/users/web_profile_info/?username=' + encodeURIComponent(a));
+      const u = j && j.data && j.data.user;
+      if (!u) throw new Error('perfil não encontrado');
+      return { pk: String(u.id || ''), followers: num(u.edge_followed_by ? u.edge_followed_by.count : u.follower_count),
+        is_verified: !!u.is_verified };
+    }
+    if (op === 'unfollow') {
+      if (typeof a !== 'string' || !/^\d{1,25}$/.test(a)) throw new Error('usuário inválido');
+      const csrf = cookie('csrftoken');
+      if (!csrf) throw new Error('sem sessão');
+      const j = await apiJson('/api/v1/friendships/destroy/' + a + '/', {
+        method: 'POST',
+        headers: { 'X-IG-App-ID': APP_ID, 'X-Requested-With': 'XMLHttpRequest', 'X-CSRFToken': csrf,
+          'Content-Type': 'application/x-www-form-urlencoded' },
+        body: 'container_module=profile&user_id=' + a,
+      });
+      const fs = j && j.friendship_status;
+      if (j.status !== 'ok' || (fs && fs.following)) throw new Error('o Instagram não confirmou a remoção');
+      return { ok: true };
+    }
+    throw new Error('operação inválida');
+  };
+
   // ---------- navegação passo a passo (gramdesk-browse) ----------
   // Só lê o que a página já mostra: nenhuma requisição sai daqui. O app pede uma ação
   // por vez e decide o ritmo; o HTML vai anotado (currentSrc, tamanho natural, visível)
@@ -954,6 +1014,18 @@
       if (!j || !j.waiter) return false;
       if (ok === true) j.waiter.resolve();
       else j.waiter.reject(new Error('limite-local:' + String(reason || '').replace(/[^a-z-]/g, '').slice(0, 20)));
+      return true;
+    },
+    follow(id, op, a) {
+      if (!/^[a-f0-9]{16}$/.test(id) || results.size > 32 || researchJobs.size >= 1) return false;
+      if (!['me', 'followers', 'following', 'profile', 'unfollow'].includes(op)) return false;
+      results.set(id, null);
+      followOp(op, a).then(
+        (data) => results.set(id, { ok: true, data }),
+        (e) => results.set(id, e instanceof Blocked
+          ? { ok: false, blocked: e.info }
+          : { ok: false, error: String((e && e.message) || e).slice(0, 200) }),
+      );
       return true;
     },
     take(id) {
