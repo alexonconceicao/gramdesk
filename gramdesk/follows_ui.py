@@ -72,6 +72,14 @@ def _mode_label(mode) -> str:
     return {"famosos": "não seguidores famosos", "selecao": "seleção"}.get(mode, "não seguidores")
 
 
+def _clock(seconds: float) -> str:
+    """Tempo que falta, em mm:ss (ou h:mm:ss)."""
+    total = max(0, int(seconds + 0.5))
+    h, rest = divmod(total, 3600)
+    m, sec = divmod(rest, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
 def _when(ts: float) -> str:
     return time.strftime("%d/%m/%Y %H:%M", time.localtime(ts)) if ts else "nunca"
 
@@ -148,6 +156,9 @@ class FollowsPage(QWidget):
         self.rows: dict[str, dict] = {}
         self._rendered_tab = ""
         self._filter_timer = QTimer(self, singleShot=True, interval=150, timeout=self._apply_filter)
+        self._clock = QTimer(self, interval=1000, timeout=self._refresh_clocks)
+        self._clock.start()
+        self.cool = None
         win.follows.progress.connect(self._progress)
         win.follows.changed.connect(self._changed)
         win.follows.item.connect(self._on_item)
@@ -210,7 +221,7 @@ class FollowsPage(QWidget):
         old = self.scroll.takeWidget()
         if old is not None:
             old.deleteLater()
-        self.status = self.info = self.batch_info = None
+        self.status = self.info = self.batch_info = self.cool = None
         self.rows = {}
         self._rendered_tab = self.tab
         page = QWidget()
@@ -324,9 +335,8 @@ class FollowsPage(QWidget):
         self._refresh_info()
         if not cur.logged_in:
             f.addWidget(_label("Entre na conta para usar esta tela.", "error", True))
-        u = summ["unfollow"]
-        if not u["ok"] and u["reason"] == "cooldown":
-            f.addWidget(_label(u["message"], "error", True))
+        self.cool = _label("", "error", True)
+        f.addWidget(self.cool)
         if busy:
             run = QHBoxLayout()
             run.addWidget(_label(f"Em andamento: {_job_label(ctl.job)}", "rowTitle"), 1)
@@ -341,6 +351,26 @@ class FollowsPage(QWidget):
         f.addWidget(self.status)
         return panel
 
+    def _refresh_clocks(self):
+        """Contagem regressiva ao vivo: espera entre ações e resfriamento da conta."""
+        if not self.isVisible() or self.win.current is None:
+            return
+        self._refresh_info()
+        self._refresh_batch_info()
+        if self.cool is None:
+            return
+        u = self.win.follows.summary(self.win.current.account.id)["unfollow"]
+        try:
+            if u["ok"] or u["reason"] != "cooldown":
+                self.cool.setText("")
+                self.cool.setVisible(False)
+                return
+            left = u["until"] - time.time()
+            self.cool.setVisible(True)
+            self.cool.setText(f"{u['message'].split('.')[0]}. Liberado em {_clock(left)}.")
+        except RuntimeError:
+            self.cool = None
+
     def _refresh_info(self):
         cur, st, batch = self._ctx()
         if cur is None or self.info is None:
@@ -354,6 +384,9 @@ class FollowsPage(QWidget):
         b = s["batch"]
         if b:
             txt += f"  ·  lote: {b['done']} de {b['total']} feitos" + (f", {b['errors']} com erro" if b["errors"] else "")
+        ctl = self.win.follows
+        if ctl.waiting_until:
+            txt += f"  ·  {ctl.waiting_label} em {_clock(ctl.waiting_until - time.time())}"
         try:
             self.info.setText(txt)
         except RuntimeError:

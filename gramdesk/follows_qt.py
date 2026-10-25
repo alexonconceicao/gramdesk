@@ -40,6 +40,9 @@ class FollowsController(QObject):
         self._stores: dict[str, follows.FollowStore] = {}
         self._queued_start: str = ""  # conta com lote esperando a tarefa atual terminar
         self._timer = QTimer(self, singleShot=True, timeout=self._step)
+        self.waiting_until = 0.0   # fim da espera atual (0 = não está esperando)
+        self.waiting_label = ""    # o que está esperando
+        self._tick = QTimer(self, interval=1000, timeout=self._on_tick)
         self._daily = QTimer(self, interval=30 * 60 * 1000, timeout=self._daily_tick)
         self._daily.start()
         QTimer.singleShot(120_000, self._daily_tick)
@@ -293,13 +296,36 @@ class FollowsController(QObject):
         self._end(OK, "Tarefa interrompida. O lote fica salvo e pode ser retomado.")
 
     # ---------------------------------------------------------------- ritmo
-    def _schedule(self, wait: float, quiet: bool = False):
+    @staticmethod
+    def countdown(seconds: float) -> str:
+        """Tempo que falta, em mm:ss (ou h:mm:ss)."""
+        total = max(0, int(seconds + 0.5))
+        h, rest = divmod(total, 3600)
+        m, sec = divmod(rest, 60)
+        return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+    def _schedule(self, wait: float, quiet: bool = False, label: str = ""):
         if self.job is None:
             return
-        if wait >= 15 and not quiet:
-            self._emit(f"{KIND_LABEL[self.job['kind']]}: pausa de {ratelimit.human_left(wait) if wait >= 60 else str(int(wait)) + ' s'} "
-                       "para manter o ritmo humano...")
-        self._timer.start(int(max(0.0, wait) * 1000))
+        wait = max(0.0, wait)
+        if wait >= 3:
+            self.waiting_label = label or ("próxima ação" if self.job["kind"] == "unfollow" else "próxima leitura")
+            self.waiting_until = time.time() + wait
+            self._tick.start()
+            self._on_tick()
+        self._timer.start(int(wait * 1000))
+
+    def _on_tick(self):
+        left = self.waiting_until - time.time()
+        if self.job is None or left <= 0:
+            self._stop_tick()
+            return
+        self._emit(f"{self.waiting_label.capitalize()} em {self.countdown(left)}...")
+
+    def _stop_tick(self):
+        self._tick.stop()
+        self.waiting_until = 0.0
+        self.waiting_label = ""
 
     def _read_permit(self) -> bool:
         """Pacer da leitura: agenda a próxima requisição ou encerra por teto. True = pode seguir agora."""
@@ -308,9 +334,7 @@ class FollowsController(QObject):
         if d.stop == "hora" and not job.get("granted"):
             # Teto por hora: espera a janela andar em vez de parar.
             job["granted"] = True
-            self._emit(f"{KIND_LABEL[job['kind']]}: teto de {self.limits().per_hour} por hora atingido; "
-                       f"continua em {ratelimit.human_left(d.wait)}...")
-            self._schedule(d.wait, quiet=True)
+            self._schedule(d.wait, label=f"teto de {self.limits().per_hour} por hora, continua")
             return False
         if d.stop == "dia":
             if job["kind"] == "check":
@@ -342,7 +366,7 @@ class FollowsController(QObject):
             return
         rem = job["hold_until"] - time.time()
         if rem > 0.2:
-            self._schedule(rem)
+            self._schedule(rem, label="pausa de segurança, continua")
             return
         if kind == "check":
             p = job["store"].partial
@@ -371,7 +395,8 @@ class FollowsController(QObject):
                 self._end(COOLDOWN if chk["reason"] == "cooldown" else QUOTA, chk["message"])
                 return
             if chk["wait"] > 0.2:
-                self._schedule(chk["wait"])
+                self._schedule(chk["wait"], label=f"próxima ação (@{job['store'].following.get(pk, {}).get('u', '')})"
+                               if pk in job["store"].following else "próxima ação")
                 return
             job["pk"] = pk
             self.item.emit(pk, "ativo")
@@ -471,9 +496,7 @@ class FollowsController(QObject):
                            slow=round(job["pacer"].slow if job["pacer"] else job["slow"], 1))
         self.win.rlog.write("seg-desacelerar", account=job["s"].account.name, kind=job["kind"], status=status,
                             seconds=wait, n=job["soft_total"])
-        self._emit(f"O Instagram pediu para ir mais devagar. Pausa de {minutes} min e ritmo mais lento; "
-                   "a tarefa continua sozinha depois.")
-        self._schedule(wait, quiet=True)
+        self._schedule(wait, label="o Instagram pediu calma; a tarefa continua sozinha")
         return True
 
     def _on_page(self, res: dict):
@@ -620,6 +643,7 @@ class FollowsController(QObject):
             return
         self.job = None
         self._timer.stop()
+        self._stop_tick()
         self._drop_page(job)
         self.win.rlog.write("seg-fim", account=job["s"].account.name, kind=job["kind"], code=code,
                             requests=job["requests"], done=job["done"], seconds=time.time() - job["started"],

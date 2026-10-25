@@ -13,7 +13,7 @@ from . import ratelimit, security
 
 APP_NAME = "gramdesk"
 APP_ID = "io.github.alexonconceicao.Gramdesk"
-VERSION = "0.13.2"
+VERSION = "0.13.3"
 
 
 IS_WINDOWS = os.name == "nt"

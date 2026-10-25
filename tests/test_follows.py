@@ -277,3 +277,11 @@ def test_retry_errors_puts_them_back(st):
     assert set(b["errors"]) == {"3"} and st.next_in_batch(b) == "2"  # ordem do lote
     assert set(st.load_batch()["errors"]) == {"3"}
     assert st.retry_errors(b) == 0
+
+
+def test_countdown_format():
+    from gramdesk.follows_qt import FollowsController as C
+
+    assert C.countdown(0) == "0:00" and C.countdown(5.6) == "0:06" and C.countdown(59) == "0:59"
+    assert C.countdown(60) == "1:00" and C.countdown(599) == "9:59" and C.countdown(3600) == "1:00:00"
+    assert C.countdown(-10) == "0:00"
